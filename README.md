@@ -2,6 +2,40 @@
 
 This repo provides lightweight operational testing tools for `dpolaris_ai` and `dpolaris`.
 
+## Backend deep-learning smoke runner
+
+Run from `C:\my-git\dPolaris_ops`:
+
+```powershell
+python ops_smoke.py
+```
+
+Expected success output:
+
+```text
+Smoke Summary
+- job_id: <uuid>
+- status: completed
+- model_path: <path or (none)>
+- error: (none)
+```
+
+Expected failure output:
+
+```text
+FAIL: backend is not healthy after 30s (...)
+```
+
+or
+
+```text
+Smoke Summary
+- job_id: <uuid>
+- status: failed
+- model_path: (none)
+- error: <error details>
+```
+
 ## Ops CLI (Windows one-liner)
 
 ```powershell
