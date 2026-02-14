@@ -1,12 +1,6 @@
 ﻿# dPolaris Ops Runner (Windows)
 
-This repo provides a standalone ops runner for backend lifecycle control and smoke testing without editing `dpolaris` or `dpolaris_ai`.
-
-## Paths assumed
-
-- Backend repo: `C:\my-git\dpolaris_ai`
-- Java repo: `C:\my-git\dpolaris`
-- Backend host/port: `127.0.0.1:8420`
+Standalone Windows-first tooling to manage and test `dpolaris_ai` from this repo only.
 
 ## Quickstart
 
@@ -17,65 +11,39 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## CLI usage
+## One-command flow
 
-Main command:
-
-```powershell
-.\.venv\Scripts\python.exe -m opsctl <command>
-```
-
-Commands:
+From one Windows PowerShell window:
 
 ```powershell
-.\.venv\Scripts\python.exe -m opsctl status
-.\.venv\Scripts\python.exe -m opsctl start-backend
-.\.venv\Scripts\python.exe -m opsctl stop-backend
-.\.venv\Scripts\python.exe -m opsctl restart-backend
-.\.venv\Scripts\python.exe -m opsctl smoke
+.\ops.bat up
+.\ops.bat smoke
+.\ops.bat down
 ```
 
-Smoke options:
+## Commands
+
+`ops.bat` and `scripts\ops.ps1` call `python -m ops.main`.
+
+Available commands:
+
+- `status`: prints health, port owner PID, command line, and managed/safe state.
+- `up`: starts backend only when unhealthy.
+- `smoke`: checks `/health`, `/api/status`, `/api/universe/list` (warn-only), and runs a tiny deep-learning train job.
+- `down`: stops backend only if process command line matches expected `dpolaris_ai` server.
+
+Direct Python usage:
 
 ```powershell
-.\.venv\Scripts\python.exe -m opsctl smoke --symbol AAPL --model lstm --epochs 1 --timeout 30 --job-timeout 600
+.\.venv\Scripts\python.exe -m ops.main status
+.\.venv\Scripts\python.exe -m ops.main up
+.\.venv\Scripts\python.exe -m ops.main smoke --symbol AAPL --model lstm --epochs 1 --timeout 30 --job-timeout 600
+.\.venv\Scripts\python.exe -m ops.main down
 ```
-
-## Windows one-click launchers
-
-- `scripts\start_backend.bat`
-- `scripts\restart_backend.bat`
-- `scripts\smoke.bat`
-
-These launchers use this repo's venv Python if available, otherwise `py`/`python`.
-
-## Safety behavior
-
-When port `8420` is already in use, `opsctl` inspects owner PID/command line.
-It only terminates the owner if command line matches the expected backend process (`cli.main server` and `C:\my-git\dpolaris_ai`).
-Otherwise it refuses to kill and exits with a clear error.
 
 ## Logging
 
-`opsctl` writes logs inside this repo:
+All runner logs are written under this repo:
 
 - `.\.ops_logs\ops_YYYYMMDD.log`
-- `.\.ops_logs\opsctl_backend.pid`
-
-Backend process output is redirected to:
-
-- `%USERPROFILE%\dpolaris_data\logs\ops_backend.log`
-
-## Validation
-
-Run:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\verify.py
-```
-
-Or:
-
-```powershell
-py -3 .\scripts\verify.py
-```
+- `.\.ops_logs\backend.pid`

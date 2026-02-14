@@ -173,6 +173,19 @@ def is_expected_backend_cmdline(cmdline: str, ai_root: Path) -> bool:
     return ("cli.main" in norm and "server" in norm and ai_norm in norm)
 
 
+def is_managed_backend(pid: int, cmdline: str, ai_root: Path) -> bool:
+    if is_expected_backend_cmdline(cmdline, ai_root):
+        return True
+    if PID_FILE.exists():
+        try:
+            saved = PID_FILE.read_text(encoding="utf-8").strip()
+            if saved.isdigit() and int(saved) == pid:
+                return True
+        except Exception:
+            return False
+    return False
+
+
 def terminate_pid(pid: int) -> None:
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
@@ -196,7 +209,12 @@ def extract_job_id(payload: Any) -> str | None:
     return None
 
 
-def cmd_start_backend(args: argparse.Namespace) -> int:
+def cmd_up(args: argparse.Namespace) -> int:
+    healthy, detail = health_once(args.url)
+    if healthy:
+        _print("PASS", f"backend already healthy at {args.url} ({detail})")
+        return 0
+
     ai_root = Path(args.ai_root)
     python_exe = ai_root / ".venv" / "Scripts" / "python.exe"
     if not python_exe.exists():
@@ -206,7 +224,7 @@ def cmd_start_backend(args: argparse.Namespace) -> int:
     owner = find_listening_pid(args.port)
     if owner:
         cmd = pid_cmdline(owner)
-        if is_expected_backend_cmdline(cmd, ai_root):
+        if is_managed_backend(owner, cmd, ai_root):
             _print("WARN", f"port {args.port} in use by matching backend pid={owner}; terminating before start")
             terminate_pid(owner)
             time.sleep(1.0)
@@ -238,12 +256,12 @@ def cmd_start_backend(args: argparse.Namespace) -> int:
     return 1
 
 
-def cmd_stop_backend(args: argparse.Namespace) -> int:
+def cmd_down(args: argparse.Namespace) -> int:
     ai_root = Path(args.ai_root)
     owner = find_listening_pid(args.port)
     if owner:
         cmd = pid_cmdline(owner)
-        if is_expected_backend_cmdline(cmd, ai_root):
+        if is_managed_backend(owner, cmd, ai_root):
             terminate_pid(owner)
             _print("PASS", f"stopped backend pid={owner}")
             try:
@@ -273,11 +291,28 @@ def cmd_stop_backend(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_restart_backend(args: argparse.Namespace) -> int:
-    stop_code = cmd_stop_backend(args)
-    if stop_code != 0:
-        return stop_code
-    return cmd_start_backend(args)
+def cmd_status(args: argparse.Namespace) -> int:
+    owner = find_listening_pid(args.port)
+    health, health_detail = health_once(args.url)
+    print("Status Summary")
+    print(f"  URL: {args.url}")
+    print(f"  Port: {args.port}")
+    print(f"  Health: {'PASS' if health else 'FAIL'} ({health_detail})")
+    if not owner:
+        print("  Port Owner PID: none")
+        print("  Port Owner Cmdline: n/a")
+        print("  Managed/Safe: no")
+        return 1 if not health else 0
+    cmd = pid_cmdline(owner)
+    managed = is_managed_backend(owner, cmd, Path(args.ai_root))
+    print(f"  Port Owner PID: {owner}")
+    print(f"  Port Owner Cmdline: {cmd or 'n/a'}")
+    print(f"  Managed/Safe: {'yes' if managed else 'no'}")
+    if health:
+        _print("PASS", "status check complete")
+        return 0
+    _print("WARN", "service not healthy")
+    return 1
 
 
 def cmd_smoke(args: argparse.Namespace) -> int:
@@ -367,16 +402,15 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--port", type=int, default=8420)
     common.add_argument("--timeout", type=int, default=30)
 
-    p_start = sub.add_parser("start-backend", parents=[common], help="Start backend safely")
-    p_start.add_argument("--llm-provider", default="none")
-    p_start.set_defaults(func=cmd_start_backend)
+    p_status = sub.add_parser("status", parents=[common], help="Show health + port owner and managed safety")
+    p_status.set_defaults(func=cmd_status)
 
-    p_stop = sub.add_parser("stop-backend", parents=[common], help="Stop backend safely")
-    p_stop.set_defaults(func=cmd_stop_backend)
+    p_up = sub.add_parser("up", parents=[common], help="Start backend if unhealthy")
+    p_up.add_argument("--llm-provider", default="none")
+    p_up.set_defaults(func=cmd_up)
 
-    p_restart = sub.add_parser("restart-backend", parents=[common], help="Restart backend safely")
-    p_restart.add_argument("--llm-provider", default="none")
-    p_restart.set_defaults(func=cmd_restart_backend)
+    p_down = sub.add_parser("down", parents=[common], help="Stop managed backend safely")
+    p_down.set_defaults(func=cmd_down)
 
     p_smoke = sub.add_parser("smoke", help="Run API + deep-learning smoke checks")
     p_smoke.add_argument("--url", default=DEFAULT_BASE_URL)
