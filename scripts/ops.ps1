@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet("up", "down", "smoke-fast", "smoke-dl", "status")]
+    [ValidateSet("up", "down", "smoke-fast", "smoke-dl", "smoke", "status")]
     [string]$Command,
     [string]$Url = "http://127.0.0.1:8420",
     [Alias("Host")]
@@ -35,7 +35,7 @@ $argsList = @("-m", "ops.main", $Command, "--url", $Url, "--timeout", "$Timeout"
 if ($Command -in @("up", "down", "status")) {
     $argsList += @("--ai-root", $AiRoot, "--host", $ServerHost, "--port", "$Port")
 }
-if ($Command -eq "smoke-dl") {
+if ($Command -in @("smoke-dl", "smoke")) {
     $argsList += @(
         "--symbol", $Symbol,
         "--model", $Model,

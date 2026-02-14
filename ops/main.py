@@ -123,7 +123,8 @@ def wait_healthy(base_url: str, timeout_seconds: int) -> tuple[bool, float, str]
     return False, time.time() - start, last
 
 
-def find_listening_pid(port: int) -> int | None:
+def find_listening_pids(port: int) -> list[int]:
+    pids: set[int] = set()
     proc = subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True, check=False)
     for line in proc.stdout.splitlines():
         text = line.strip()
@@ -136,10 +137,15 @@ def find_listening_pid(port: int) -> int | None:
         if not local_addr.endswith(f":{port}"):
             continue
         try:
-            return int(parts[-1])
+            pids.add(int(parts[-1]))
         except Exception:
             continue
-    return None
+    return sorted(pids)
+
+
+def find_listening_pid(port: int) -> int | None:
+    pids = find_listening_pids(port)
+    return pids[0] if pids else None
 
 
 def pid_cmdline(pid: int) -> str:
@@ -183,6 +189,52 @@ def terminate_pid(pid: int) -> None:
         pass
 
 
+def takeover_port(port: int, rounds: int = 3, wait_seconds: int = 10) -> bool:
+    for round_idx in range(1, rounds + 1):
+        pids = find_listening_pids(port)
+        if not pids:
+            _print("PASS", f"port {port} is free")
+            return True
+        _print("WARN", f"port {port} takeover round {round_idx}: killing pids {pids}")
+        for pid in pids:
+            try:
+                terminate_pid(pid)
+            except Exception as exc:
+                _print("WARN", f"taskkill failed for pid {pid}: {exc}")
+        deadline = time.time() + max(1, wait_seconds)
+        while time.time() < deadline:
+            if not find_listening_pids(port):
+                _print("PASS", f"port {port} released after round {round_idx}")
+                return True
+            time.sleep(0.5)
+    remaining = find_listening_pids(port)
+    if remaining:
+        _print("FAIL", f"port {port} still occupied after takeover attempts: {remaining}")
+        return False
+    return True
+
+
+def kill_recorded_pids() -> None:
+    if not PID_FILE.exists():
+        return
+    try:
+        text = PID_FILE.read_text(encoding="utf-8").strip()
+    except Exception as exc:
+        _print("WARN", f"failed reading pid file: {exc}")
+        return
+    if text.isdigit():
+        pid = int(text)
+        _print("WARN", f"killing recorded pid {pid}")
+        try:
+            terminate_pid(pid)
+        except Exception as exc:
+            _print("WARN", f"failed killing recorded pid {pid}: {exc}")
+    try:
+        PID_FILE.unlink(missing_ok=True)
+    except Exception as exc:
+        _print("WARN", f"failed removing pid file: {exc}")
+
+
 def tail_lines(path: Path, line_count: int) -> list[str]:
     if not path.exists():
         return []
@@ -224,18 +276,8 @@ def extract_job_logs(payload: Any) -> list[str]:
 
 
 def cmd_up(args: argparse.Namespace) -> int:
-    healthy, detail = health_once(args.url)
-    if healthy:
-        _print("PASS", f"backend already healthy at {args.url} ({detail})")
-        return 0
-
-    owner = find_listening_pid(args.port)
-    if owner is not None:
-        cmd = pid_cmdline(owner)
-        _print("FAIL", f"port {args.port} is LISTENING while backend is unhealthy")
-        _print("FAIL", f"owner pid={owner}")
-        _print("FAIL", f"owner cmdline={cmd or 'n/a'}")
-        return 1
+    _print("INFO", f"up: hard takeover on port {args.port} before start")
+    takeover_port(args.port, rounds=3, wait_seconds=10)
 
     ai_root = Path(args.ai_root)
     python_exe = ai_root / ".venv" / "Scripts" / "python.exe"
@@ -268,39 +310,37 @@ def cmd_up(args: argparse.Namespace) -> int:
         _print("PASS", f"backend healthy in {elapsed:.1f}s")
         return 0
     _print("FAIL", f"backend did not become healthy in {elapsed:.1f}s ({detail})")
+    _print("WARN", "latest backend log tail:")
+    for line in tail_lines(BACKEND_STDOUT_LOG, 30):
+        print(f"  {line}")
     return 1
 
 
 def cmd_down(args: argparse.Namespace) -> int:
-    owner = find_listening_pid(args.port)
-    if owner is None:
-        _print("WARN", "backend not running")
-        return 0
-
-    cmd = pid_cmdline(owner)
-    if not managed_cmdline(cmd):
-        _print("FAIL", f"refusing to stop pid={owner}; owner is not managed backend")
-        _print("FAIL", f"owner cmdline={cmd or 'n/a'}")
+    _print("INFO", f"down: hard takeover kill on port {args.port}")
+    takeover_port(args.port, rounds=3, wait_seconds=10)
+    kill_recorded_pids()
+    if find_listening_pids(args.port):
+        _print("FAIL", f"down completed but port {args.port} still occupied")
         return 1
-
-    terminate_pid(owner)
-    _print("PASS", f"stopped managed backend pid={owner}")
-    try:
-        PID_FILE.unlink(missing_ok=True)
-    except Exception:
-        pass
+    _print("PASS", "down completed")
     return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    owner = find_listening_pid(args.port)
+    owners = find_listening_pids(args.port)
     health, health_detail = health_once(args.url)
     print("Status Summary")
     print(f"  health: {'PASS' if health else 'FAIL'} ({health_detail})")
-    print(f"  owner_pid: {owner if owner is not None else 'none'}")
-    cmd = pid_cmdline(owner) if owner is not None else ""
-    print(f"  owner_cmdline: {cmd or 'n/a'}")
-    print(f"  managed_owner: {'yes' if managed_cmdline(cmd) else 'no'}")
+    print(f"  owner_pids: {owners if owners else 'none'}")
+    if not owners:
+        print("  owner_cmdline: n/a")
+        print("  managed_owner: no")
+        return 0 if health else 1
+    for pid in owners:
+        cmd = pid_cmdline(pid)
+        print(f"  pid={pid} cmdline={cmd or 'n/a'}")
+        print(f"  pid={pid} managed_owner={'yes' if managed_cmdline(cmd) else 'no'}")
     return 0 if health else 1
 
 
@@ -422,6 +462,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_smoke_dl.add_argument("--job-timeout", type=int, default=600)
     p_smoke_dl.add_argument("--tail-logs", type=int, default=20)
     p_smoke_dl.set_defaults(func=cmd_smoke_dl)
+
+    p_smoke_alias = sub.add_parser("smoke", parents=[common], help="Alias for smoke-dl")
+    p_smoke_alias.add_argument("--symbol", default="AAPL")
+    p_smoke_alias.add_argument("--model", default="lstm")
+    p_smoke_alias.add_argument("--epochs", type=int, default=1)
+    p_smoke_alias.add_argument("--job-timeout", type=int, default=600)
+    p_smoke_alias.add_argument("--tail-logs", type=int, default=20)
+    p_smoke_alias.set_defaults(func=cmd_smoke_dl)
 
     return parser
 
