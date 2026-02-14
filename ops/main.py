@@ -27,9 +27,12 @@ except Exception:
 OPS_ROOT = Path(__file__).resolve().parents[1]
 OPS_LOG_DIR = OPS_ROOT / ".ops_logs"
 PID_FILE = OPS_LOG_DIR / "backend.pid"
-DEFAULT_BASE_URL = "http://127.0.0.1:8420"
+BACKEND_STDOUT_LOG = OPS_LOG_DIR / "backend_stdout.log"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8420
+DEFAULT_BASE_URL = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}"
 DEFAULT_AI_ROOT = Path(r"C:\my-git\dpolaris_ai")
-DEFAULT_PYTHON = DEFAULT_AI_ROOT / ".venv" / "Scripts" / "python.exe"
+MANAGED_PY_EXE = r"dpolaris_ai\.venv\scripts\python.exe"
 
 
 def setup_logging() -> Path:
@@ -165,25 +168,9 @@ def pid_cmdline(pid: int) -> str:
         return ""
 
 
-def is_expected_backend_cmdline(cmdline: str, ai_root: Path) -> bool:
-    if not cmdline:
-        return False
-    norm = cmdline.lower().replace("/", "\\")
-    ai_norm = str(ai_root).lower().replace("/", "\\")
-    return ("cli.main" in norm and "server" in norm and ai_norm in norm)
-
-
-def is_managed_backend(pid: int, cmdline: str, ai_root: Path) -> bool:
-    if is_expected_backend_cmdline(cmdline, ai_root):
-        return True
-    if PID_FILE.exists():
-        try:
-            saved = PID_FILE.read_text(encoding="utf-8").strip()
-            if saved.isdigit() and int(saved) == pid:
-                return True
-        except Exception:
-            return False
-    return False
+def managed_cmdline(cmdline: str) -> bool:
+    norm = (cmdline or "").lower().replace("/", "\\")
+    return MANAGED_PY_EXE in norm
 
 
 def terminate_pid(pid: int) -> None:
@@ -194,6 +181,16 @@ def terminate_pid(pid: int) -> None:
         os.kill(pid, signal.SIGTERM)
     except Exception:
         pass
+
+
+def tail_lines(path: Path, line_count: int) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return lines[-max(1, line_count):]
+    except Exception:
+        return []
 
 
 def extract_job_id(payload: Any) -> str | None:
@@ -209,11 +206,36 @@ def extract_job_id(payload: Any) -> str | None:
     return None
 
 
+def extract_job_logs(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    logs: list[str] = []
+    for key in ("logs", "log_lines", "history", "messages"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            for item in value:
+                line = str(item).strip()
+                if line:
+                    logs.append(line)
+    text_value = payload.get("log") or payload.get("output")
+    if isinstance(text_value, str) and text_value.strip():
+        logs.extend([line for line in text_value.splitlines() if line.strip()])
+    return logs
+
+
 def cmd_up(args: argparse.Namespace) -> int:
     healthy, detail = health_once(args.url)
     if healthy:
         _print("PASS", f"backend already healthy at {args.url} ({detail})")
         return 0
+
+    owner = find_listening_pid(args.port)
+    if owner is not None:
+        cmd = pid_cmdline(owner)
+        _print("FAIL", f"port {args.port} is LISTENING while backend is unhealthy")
+        _print("FAIL", f"owner pid={owner}")
+        _print("FAIL", f"owner cmdline={cmd or 'n/a'}")
+        return 1
 
     ai_root = Path(args.ai_root)
     python_exe = ai_root / ".venv" / "Scripts" / "python.exe"
@@ -221,33 +243,26 @@ def cmd_up(args: argparse.Namespace) -> int:
         _print("FAIL", f"missing backend python: {python_exe}")
         return 1
 
-    owner = find_listening_pid(args.port)
-    if owner:
-        cmd = pid_cmdline(owner)
-        if is_managed_backend(owner, cmd, ai_root):
-            _print("WARN", f"port {args.port} in use by matching backend pid={owner}; terminating before start")
-            terminate_pid(owner)
-            time.sleep(1.0)
-        else:
-            _print("FAIL", f"port {args.port} is in use by non-backend process pid={owner}")
-            if cmd:
-                _print("FAIL", f"owner cmdline: {cmd}")
-            return 1
-
     env = os.environ.copy()
-    env["LLM_PROVIDER"] = args.llm_provider
+    env["LLM_PROVIDER"] = "none"
+    OPS_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_handle = open(BACKEND_STDOUT_LOG, "a", encoding="utf-8")
 
     proc = subprocess.Popen(
         [str(python_exe), "-m", "cli.main", "server", "--host", args.host, "--port", str(args.port)],
         cwd=str(ai_root),
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        text=True,
     )
-    OPS_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(proc.pid), encoding="utf-8")
-    _print("INFO", f"backend start requested pid={proc.pid}")
+    try:
+        log_handle.close()
+    except Exception:
+        pass
 
+    PID_FILE.write_text(str(proc.pid), encoding="utf-8")
+    _print("INFO", f"started backend pid={proc.pid}")
     ok, elapsed, detail = wait_healthy(args.url, args.timeout)
     if ok:
         _print("PASS", f"backend healthy in {elapsed:.1f}s")
@@ -257,37 +272,23 @@ def cmd_up(args: argparse.Namespace) -> int:
 
 
 def cmd_down(args: argparse.Namespace) -> int:
-    ai_root = Path(args.ai_root)
     owner = find_listening_pid(args.port)
-    if owner:
-        cmd = pid_cmdline(owner)
-        if is_managed_backend(owner, cmd, ai_root):
-            terminate_pid(owner)
-            _print("PASS", f"stopped backend pid={owner}")
-            try:
-                PID_FILE.unlink(missing_ok=True)
-            except Exception:
-                pass
-            return 0
-        _print("FAIL", f"refusing to stop pid={owner} on port {args.port}; command line does not match backend")
-        if cmd:
-            _print("FAIL", f"owner cmdline: {cmd}")
+    if owner is None:
+        _print("WARN", "backend not running")
+        return 0
+
+    cmd = pid_cmdline(owner)
+    if not managed_cmdline(cmd):
+        _print("FAIL", f"refusing to stop pid={owner}; owner is not managed backend")
+        _print("FAIL", f"owner cmdline={cmd or 'n/a'}")
         return 1
 
-    if PID_FILE.exists():
-        text = PID_FILE.read_text(encoding="utf-8").strip()
-        if text.isdigit():
-            pid = int(text)
-            cmd = pid_cmdline(pid)
-            if is_expected_backend_cmdline(cmd, ai_root):
-                terminate_pid(pid)
-                _print("PASS", f"stopped backend pid={pid} from pid file")
-                try:
-                    PID_FILE.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                return 0
-    _print("WARN", "backend not running")
+    terminate_pid(owner)
+    _print("PASS", f"stopped managed backend pid={owner}")
+    try:
+        PID_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
     return 0
 
 
@@ -295,66 +296,59 @@ def cmd_status(args: argparse.Namespace) -> int:
     owner = find_listening_pid(args.port)
     health, health_detail = health_once(args.url)
     print("Status Summary")
-    print(f"  URL: {args.url}")
-    print(f"  Port: {args.port}")
-    print(f"  Health: {'PASS' if health else 'FAIL'} ({health_detail})")
-    if not owner:
-        print("  Port Owner PID: none")
-        print("  Port Owner Cmdline: n/a")
-        print("  Managed/Safe: no")
-        return 1 if not health else 0
-    cmd = pid_cmdline(owner)
-    managed = is_managed_backend(owner, cmd, Path(args.ai_root))
-    print(f"  Port Owner PID: {owner}")
-    print(f"  Port Owner Cmdline: {cmd or 'n/a'}")
-    print(f"  Managed/Safe: {'yes' if managed else 'no'}")
-    if health:
-        _print("PASS", "status check complete")
-        return 0
-    _print("WARN", "service not healthy")
-    return 1
+    print(f"  health: {'PASS' if health else 'FAIL'} ({health_detail})")
+    print(f"  owner_pid: {owner if owner is not None else 'none'}")
+    cmd = pid_cmdline(owner) if owner is not None else ""
+    print(f"  owner_cmdline: {cmd or 'n/a'}")
+    print(f"  managed_owner: {'yes' if managed_cmdline(cmd) else 'no'}")
+    return 0 if health else 1
 
 
-def cmd_smoke(args: argparse.Namespace) -> int:
+def cmd_smoke_fast(args: argparse.Namespace) -> int:
     ok, elapsed, detail = wait_healthy(args.url, args.timeout)
     if not ok:
-        _print("FAIL", f"health check failed after {elapsed:.1f}s ({detail})")
+        _print("FAIL", f"GET /health failed after {elapsed:.1f}s ({detail})")
         return 1
     _print("PASS", "GET /health")
 
-    ok, _, status_payload, err = http_json("GET", args.url, "/api/status", timeout=15)
-    if ok:
-        _print("PASS", "GET /api/status")
-    else:
-        _print("FAIL", f"GET /api/status failed: {err}")
+    ok, _, _, err = http_json("GET", args.url, "/api/status", timeout=15)
+    if not ok:
+        _print("FAIL", f"GET /api/status failed ({err})")
         return 1
+    _print("PASS", "GET /api/status")
 
-    ok, _, _, err = http_json("GET", args.url, "/api/universe/list", timeout=15)
+    ok, code, _, err = http_json("GET", args.url, "/api/universe/list", timeout=20)
     if ok:
         _print("PASS", "GET /api/universe/list")
-    else:
-        _print("WARN", f"GET /api/universe/list failed: {err}")
-
-    if args.no_dl_job:
-        _print("WARN", "deep-learning job smoke skipped by flag")
         return 0
+    if code == 404:
+        _print("WARN", "GET /api/universe/list returned 404")
+        return 0
+    _print("FAIL", f"GET /api/universe/list failed ({err})")
+    return 1
+
+
+def cmd_smoke_dl(args: argparse.Namespace) -> int:
+    fast_rc = cmd_smoke_fast(args)
+    if fast_rc != 0:
+        return fast_rc
 
     body = {"symbol": args.symbol, "model_type": args.model, "epochs": args.epochs}
     ok, _, enqueue_payload, err = http_json("POST", args.url, "/api/jobs/deep-learning/train", timeout=30, body=body)
     if not ok:
-        _print("FAIL", f"POST /api/jobs/deep-learning/train failed: {err}")
+        _print("FAIL", f"POST /api/jobs/deep-learning/train failed ({err})")
         return 1
 
     job_id = extract_job_id(enqueue_payload)
     if not job_id:
-        _print("FAIL", "job enqueue returned no job id")
+        _print("FAIL", "enqueue response missing job id")
         return 1
     _print("PASS", f"deep-learning job enqueued id={job_id}")
 
-    deadline = time.time() + max(5, args.job_timeout)
-    final = "timeout"
+    deadline = time.time() + max(10, args.job_timeout)
+    final_status = "timeout"
     final_error = ""
-    model_path = ""
+    final_logs: list[str] = []
     while time.time() < deadline:
         ok, _, payload, err = http_json("GET", args.url, f"/api/jobs/{job_id}", timeout=15)
         if not ok:
@@ -365,26 +359,33 @@ def cmd_smoke(args: argparse.Namespace) -> int:
             final_error = "unexpected job payload"
             time.sleep(2)
             continue
+        final_logs = extract_job_logs(payload)
         state = str(payload.get("status", "")).strip().lower()
-        model_path = str(payload.get("model_path") or payload.get("artifact_path") or "")
         if state in {"completed", "success"}:
-            final = "completed"
+            final_status = "completed"
             break
-        if state == "failed":
-            final = "failed"
+        if state in {"failed", "error"}:
+            final_status = "failed"
             final_error = str(payload.get("error") or payload.get("detail") or payload.get("message") or "")
             break
         time.sleep(2)
 
-    print("Smoke Summary")
-    print(json.dumps({
-        "status": final,
-        "job_id": job_id,
-        "model_path": model_path or None,
-        "error": final_error or None,
-    }, indent=2))
+    print("DL Smoke Summary")
+    print(json.dumps({"job_id": job_id, "status": final_status, "error": final_error or None}, indent=2))
+    print(f"Last {args.tail_logs} log lines")
+    shown = False
+    for line in final_logs[-max(1, args.tail_logs):]:
+        shown = True
+        print(f"  {line}")
+    if not shown:
+        repo_lines = tail_lines(BACKEND_STDOUT_LOG, args.tail_logs)
+        for line in repo_lines:
+            shown = True
+            print(f"  {line}")
+    if not shown:
+        print("  (no logs available)")
 
-    if final == "completed":
+    if final_status == "completed":
         _print("PASS", "deep-learning smoke passed")
         return 0
     _print("FAIL", "deep-learning smoke failed")
@@ -396,31 +397,31 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--ai-root", default=str(DEFAULT_AI_ROOT))
     common.add_argument("--url", default=DEFAULT_BASE_URL)
-    common.add_argument("--host", default="127.0.0.1")
-    common.add_argument("--port", type=int, default=8420)
+    common.add_argument("--host", default=DEFAULT_HOST)
+    common.add_argument("--port", type=int, default=DEFAULT_PORT)
     common.add_argument("--timeout", type=int, default=30)
+    common.add_argument("--ai-root", default=str(DEFAULT_AI_ROOT))
 
-    p_status = sub.add_parser("status", parents=[common], help="Show health + port owner and managed safety")
+    p_status = sub.add_parser("status", parents=[common], help="Show health + owner details")
     p_status.set_defaults(func=cmd_status)
 
-    p_up = sub.add_parser("up", parents=[common], help="Start backend if unhealthy")
-    p_up.add_argument("--llm-provider", default="none")
+    p_up = sub.add_parser("up", parents=[common], help="Start backend if needed")
     p_up.set_defaults(func=cmd_up)
 
-    p_down = sub.add_parser("down", parents=[common], help="Stop managed backend safely")
+    p_down = sub.add_parser("down", parents=[common], help="Stop managed backend")
     p_down.set_defaults(func=cmd_down)
 
-    p_smoke = sub.add_parser("smoke", help="Run API + deep-learning smoke checks")
-    p_smoke.add_argument("--url", default=DEFAULT_BASE_URL)
-    p_smoke.add_argument("--timeout", type=int, default=30)
-    p_smoke.add_argument("--symbol", default="AAPL")
-    p_smoke.add_argument("--model", default="lstm")
-    p_smoke.add_argument("--epochs", type=int, default=1)
-    p_smoke.add_argument("--job-timeout", type=int, default=600)
-    p_smoke.add_argument("--no-dl-job", action="store_true")
-    p_smoke.set_defaults(func=cmd_smoke)
+    p_smoke_fast = sub.add_parser("smoke-fast", parents=[common], help="Run fast endpoint smoke")
+    p_smoke_fast.set_defaults(func=cmd_smoke_fast)
+
+    p_smoke_dl = sub.add_parser("smoke-dl", parents=[common], help="Run deep-learning smoke")
+    p_smoke_dl.add_argument("--symbol", default="AAPL")
+    p_smoke_dl.add_argument("--model", default="lstm")
+    p_smoke_dl.add_argument("--epochs", type=int, default=1)
+    p_smoke_dl.add_argument("--job-timeout", type=int, default=600)
+    p_smoke_dl.add_argument("--tail-logs", type=int, default=20)
+    p_smoke_dl.set_defaults(func=cmd_smoke_dl)
 
     return parser
 

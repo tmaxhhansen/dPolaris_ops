@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet("status", "up", "down", "smoke")]
+    [ValidateSet("up", "down", "smoke-fast", "smoke-dl", "status")]
     [string]$Command,
     [string]$Url = "http://127.0.0.1:8420",
     [Alias("Host")]
@@ -11,7 +11,7 @@ param(
     [string]$Model = "lstm",
     [int]$Epochs = 1,
     [int]$JobTimeout = 600,
-    [switch]$NoDlJob,
+    [int]$TailLogs = 20,
     [string]$AiRoot = "C:\my-git\dpolaris_ai"
 )
 
@@ -35,9 +35,14 @@ $argsList = @("-m", "ops.main", $Command, "--url", $Url, "--timeout", "$Timeout"
 if ($Command -in @("up", "down", "status")) {
     $argsList += @("--ai-root", $AiRoot, "--host", $ServerHost, "--port", "$Port")
 }
-if ($Command -eq "smoke") {
-    $argsList += @("--symbol", $Symbol, "--model", $Model, "--epochs", "$Epochs", "--job-timeout", "$JobTimeout")
-    if ($NoDlJob) { $argsList += "--no-dl-job" }
+if ($Command -eq "smoke-dl") {
+    $argsList += @(
+        "--symbol", $Symbol,
+        "--model", $Model,
+        "--epochs", "$Epochs",
+        "--job-timeout", "$JobTimeout",
+        "--tail-logs", "$TailLogs"
+    )
 }
 
 if ($Python -eq "py") {
