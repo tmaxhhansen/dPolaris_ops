@@ -2,6 +2,23 @@
 
 This repo provides lightweight operational testing tools for `dpolaris_ai` and `dpolaris`.
 
+## Ops CLI (Windows one-liner)
+
+```powershell
+.\.venv\Scripts\python.exe .\src\ops_cli.py smoke --url http://127.0.0.1:8420 --symbol AAPL --model lstm --epochs 1
+```
+
+Other commands:
+
+```powershell
+.\.venv\Scripts\python.exe .\src\ops_cli.py health --url http://127.0.0.1:8420
+.\.venv\Scripts\python.exe .\src\ops_cli.py wait-healthy --url http://127.0.0.1:8420 --timeout 30
+.\.venv\Scripts\python.exe .\src\ops_cli.py start-backend --ai-root C:\my-git\dpolaris_ai
+.\.venv\Scripts\python.exe .\src\ops_cli.py stop-backend
+```
+
+CLI logs are written to `.\logs\ops_cli_YYYYMMDD.log`.
+
 ## How to run smoke
 
 From `C:\my-git\dPolaris_ops`:
