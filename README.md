@@ -2,33 +2,35 @@
 
 This repo provides lightweight operational testing tools for `dpolaris_ai` and `dpolaris`.
 
-## One-command smoke test
+## How to run smoke
 
-Double-click:
-
-- `scripts\smoke.cmd`
-
-Or run from PowerShell:
+From `C:\my-git\dPolaris_ops`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\smoke.ps1
+powershell -ExecutionPolicy Bypass -File .\smoke\smoke.ps1
 ```
 
-The smoke runner:
+Optional JSON output:
 
-- checks backend venv at `C:\my-git\dpolaris_ai\.venv\Scripts\python.exe`
-- ensures `GET /health` is healthy (starts backend server if needed)
-- validates:
-  - `GET /health`
-  - `GET /api/status`
-  - `GET /api/deep-learning/status`
-- enqueues tiny job:
-  - `POST /api/jobs/deep-learning/train` with `AAPL/lstm/epochs=1`
-  - polls `GET /api/jobs/{id}` until success/failed/timeout
-- prints clear PASS/FAIL and exits `0/1`
-- writes log to `dPolaris_ops\logs\smoke_YYYYMMDD_HHMMSS.log`
+```powershell
+powershell -ExecutionPolicy Bypass -File .\smoke\smoke.ps1 -Json
+```
 
-If port `8420` is LISTENING but `/health` is failing, it prints the owner PID and command-line hint.
+The smoke runner validates:
+
+1. `GET /health` (retry up to timeout)
+2. `GET /api/status`
+3. `GET /api/universe/list` (fallback to `/api/scan/universe/list`, WARN if both unavailable)
+4. `POST /api/jobs/deep-learning/train` then polls `GET /api/jobs/{id}` for completion/failure
+
+Exit codes:
+
+- `0`: PASS (WARN allowed)
+- `2`: FAIL (one or more failing checks)
+
+JSON output location when `-Json` is used:
+
+- `.\out\smoke_result.json`
 
 ## Doctor tool
 
