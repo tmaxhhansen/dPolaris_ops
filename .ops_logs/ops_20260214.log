@@ -1,0 +1,7 @@
+2026-02-14 12:25:45,557 [INFO] [INFO] log file: C:\my-git\dPolaris_ops\.ops_logs\ops_20260214.log
+2026-02-14 12:26:01,784 [INFO] [INFO] log file: C:\my-git\dPolaris_ops\.ops_logs\ops_20260214.log
+2026-02-14 12:26:01,789 [INFO] [PASS] GET /health
+2026-02-14 12:26:01,796 [INFO] [PASS] GET /api/status
+2026-02-14 12:26:01,797 [INFO] [WARN] GET /api/universe/list failed: HTTP 404
+2026-02-14 12:26:01,817 [INFO] [PASS] deep-learning job enqueued id=342fde64-96b5-47ec-a706-27c0070a13d4
+2026-02-14 12:26:01,818 [INFO] [FAIL] deep-learning smoke failed
