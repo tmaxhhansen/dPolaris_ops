@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet("start-backend", "stop-backend", "restart-backend", "smoke")]
+    [ValidateSet("status", "start-backend", "stop-backend", "restart-backend", "smoke")]
     [string]$Command,
     [string]$Url = "http://127.0.0.1:8420",
     [Alias("Host")]
@@ -30,7 +30,7 @@ if (-not (Test-Path $Python)) {
     }
 }
 
-$argsList = @("-m", "ops.main", $Command, "--url", $Url, "--timeout", "$Timeout")
+$argsList = @("-m", "opsctl", $Command, "--url", $Url, "--timeout", "$Timeout")
 
 if ($Command -in @("start-backend", "stop-backend", "restart-backend")) {
     $argsList += @("--ai-root", $AiRoot, "--host", $ServerHost, "--port", "$Port")
