@@ -1,6 +1,36 @@
-# dPolaris Ops Doctor (Windows)
+# dPolaris Ops (Windows)
 
-This repo provides a lightweight tester that validates a running backend at `http://127.0.0.1:8420` and emits reports + tickets.
+This repo provides lightweight operational testing tools for `dpolaris_ai` and `dpolaris`.
+
+## One-command smoke test
+
+Double-click:
+
+- `scripts\smoke.cmd`
+
+Or run from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\smoke.ps1
+```
+
+The smoke runner:
+
+- checks backend venv at `C:\my-git\dpolaris_ai\.venv\Scripts\python.exe`
+- ensures `GET /health` is healthy (starts backend server if needed)
+- validates:
+  - `GET /health`
+  - `GET /api/status`
+  - `GET /api/deep-learning/status`
+- enqueues tiny job:
+  - `POST /api/jobs/deep-learning/train` with `AAPL/lstm/epochs=1`
+  - polls `GET /api/jobs/{id}` until success/failed/timeout
+- prints clear PASS/FAIL and exits `0/1`
+- writes log to `dPolaris_ops\logs\smoke_YYYYMMDD_HHMMSS.log`
+
+If port `8420` is LISTENING but `/health` is failing, it prints the owner PID and command-line hint.
+
+## Doctor tool
 
 ## Layout
 
@@ -10,7 +40,7 @@ This repo provides a lightweight tester that validates a running backend at `htt
 - `ops/tickets.py`: Codex ticket generation
 - `scripts/run_doctor.ps1`: Windows helper script
 
-## Setup (PowerShell)
+### Setup (PowerShell)
 
 ```powershell
 cd C:\my-git\dPolaris_ops
@@ -19,19 +49,19 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## Run doctor
+### Run doctor
 
 ```powershell
 .\.venv\Scripts\python.exe -m ops.doctor --base-url http://127.0.0.1:8420 --symbol AAPL --model-type lstm --epochs 1 --timeout 300
 ```
 
-Or use helper script:
+Or use:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\run_doctor.ps1
 ```
 
-## Output files
+### Output files
 
 Reports are written to:
 
@@ -42,7 +72,7 @@ Reports are written to:
 - `tickets\codex1_<timestamp>.txt` (when backend action needed)
 - `tickets\codex2_<timestamp>.txt` (reserved for java-side issues)
 
-## Example console output
+### Example console output
 
 ```text
 Doctor finished.
@@ -55,7 +85,7 @@ Summary:
 }
 ```
 
-## Check order
+### Check order
 
 1. `GET /health`
 2. `GET /api/status`
