@@ -5,3 +5,36 @@
 2026-02-14 12:26:01,797 [INFO] [WARN] GET /api/universe/list failed: HTTP 404
 2026-02-14 12:26:01,817 [INFO] [PASS] deep-learning job enqueued id=342fde64-96b5-47ec-a706-27c0070a13d4
 2026-02-14 12:26:01,818 [INFO] [FAIL] deep-learning smoke failed
+2026-02-14 13:59:27,926 [INFO] [INFO] log file: C:\my-git\dPolaris_ops\.ops_logs\ops_20260214.log
+2026-02-14 13:59:27,928 [INFO] [INFO] up: hard takeover on port 8420 before start
+2026-02-14 13:59:27,947 [INFO] [WARN] port 8420 takeover round 1: killing pids [14060]
+2026-02-14 13:59:28,040 [INFO] [PASS] port 8420 released after round 1
+2026-02-14 13:59:28,044 [INFO] [INFO] started backend pid=22296
+2026-02-14 13:59:30,081 [INFO] [PASS] backend healthy in 2.0s
+2026-02-14 13:59:34,837 [INFO] [INFO] log file: C:\my-git\dPolaris_ops\.ops_logs\ops_20260214.log
+2026-02-14 13:59:34,842 [INFO] [PASS] GET /health
+2026-02-14 13:59:36,372 [INFO] [PASS] GET /api/status
+2026-02-14 13:59:36,374 [INFO] [PASS] GET /api/universe/list
+2026-02-14 13:59:36,380 [INFO] [PASS] deep-learning job enqueued id=431aa5ff-9b24-4510-9fe9-0a49cbb54b2c
+2026-02-14 13:59:42,438 [INFO] [PASS] deep-learning smoke passed
+2026-02-14 14:02:20,498 [INFO] [INFO] log file: C:\my-git\dPolaris_ops\.ops_logs\ops_20260214.log
+2026-02-14 14:02:20,500 [INFO] [INFO] up: hard takeover on port 8420 before start
+2026-02-14 14:02:20,516 [INFO] [WARN] port 8420 takeover round 1: killing pids [35444]
+2026-02-14 14:02:20,607 [INFO] [PASS] port 8420 released after round 1
+2026-02-14 14:02:20,610 [INFO] [INFO] started backend pid=29340
+2026-02-14 14:02:22,647 [INFO] [PASS] backend healthy in 2.0s
+2026-02-14 14:06:00,917 [INFO] [INFO] log file: C:\my-git\dPolaris_ops\.ops_logs\ops_20260214.log
+2026-02-14 14:06:00,919 [INFO] [INFO] up: hard takeover on port 8420 before start
+2026-02-14 14:06:00,936 [INFO] [PASS] port 8420 is free
+2026-02-14 14:06:00,939 [INFO] [INFO] started backend pid=11336
+2026-02-14 14:06:02,976 [INFO] [PASS] backend healthy in 2.0s
+2026-02-14 14:25:57,213 [INFO] [INFO] log file: C:\my-git\dPolaris_ops\.ops_logs\ops_20260214.log
+2026-02-14 14:25:57,215 [INFO] [INFO] up: hard takeover on port 8420 before start
+2026-02-14 14:25:57,232 [INFO] [PASS] port 8420 is free
+2026-02-14 14:25:57,236 [INFO] [INFO] started backend pid=11652
+2026-02-14 14:25:59,270 [INFO] [PASS] backend healthy in 2.0s
+2026-02-14 17:52:42,297 [INFO] [INFO] log file: C:\my-git\dPolaris_ops\.ops_logs\ops_20260214.log
+2026-02-14 17:52:42,299 [INFO] [INFO] up: hard takeover on port 8420 before start
+2026-02-14 17:52:42,316 [INFO] [PASS] port 8420 is free
+2026-02-14 17:52:42,319 [INFO] [INFO] started backend pid=16496
+2026-02-14 17:52:43,861 [INFO] [PASS] backend healthy in 1.5s
