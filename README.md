@@ -1,44 +1,201 @@
 # dPolaris Ops
 
-This repo provides lightweight operational testing tools for `dpolaris_ai` and `dpolaris`.
+Operational testing and management tools for `dpolaris_ai` backend.
 
-## Mac Ops usage
+## Quick Start (macOS)
 
-Run from `~/my-git/dPolaris_ops`:
+From `~/my-git/dPolaris_ops`:
+
+```bash
+# Bring up backend (auto-kills stale processes on port 8420)
+./run_ops up
+
+# Bring down backend
+./run_ops down
+
+# Check status
+./run_ops status
+
+# Quick smoke test (health + status endpoints)
+./run_ops smoke-fast
+
+# Deep-learning smoke test
+./run_ops smoke-dl --symbol AAPL --epochs 1 --timeout 600
+```
+
+Or using Python module directly:
 
 ```bash
 python -m ops.main up
 python -m ops.main down
 python -m ops.main status
-python -m ops.main status --json
 python -m ops.main smoke-fast
-python -m ops.main smoke-dl --symbol AAPL --model lstm --epochs 1 --timeout 30 --job-timeout 600
+python -m ops.main smoke-dl --symbol AAPL --model lstm --epochs 1 --job-timeout 600
 ```
 
-Command behavior:
+## Commands
 
-- `up`: ensures backend is healthy; starts backend if needed.
-- `down`: stops backend and orchestrator (idempotent).
-- `status`: friendly status output.
-- `status --json`: prints one JSON object to stdout for machine parsing.
-- `smoke-fast`: quick `/health` + `/api/status` checks.
-- `smoke-dl`: enqueues one deep-learning train job and polls until done or timeout.
+### `up`
 
-### Troubleshooting port 8420
-
-`down` and `up` inspect the listener on `8420` with:
+Ensures backend is healthy. If port 8420 is occupied, kills the owner process and starts fresh.
 
 ```bash
+./run_ops up [--timeout 30] [--ai-root PATH] [--force] [--no-force]
+```
+
+Options:
+- `--timeout`: Seconds to wait for backend health (default: 30)
+- `--ai-root`: Path to dpolaris_ai repo (auto-detected by default)
+- `--force`: Kill any process on port 8420 (default: True for dev mode)
+- `--no-force`: Only kill allowlisted dpolaris_ai processes
+
+### `down`
+
+Stops backend and orchestrator processes.
+
+```bash
+./run_ops down [--force] [--no-force]
+```
+
+Options:
+- `--force`: Kill any process on port 8420 (default: True for dev mode)
+- `--no-force`: Only kill allowlisted dpolaris_ai processes
+
+### `status`
+
+Shows current backend and orchestrator status.
+
+```bash
+./run_ops status [--json]
+```
+
+Options:
+- `--json`: Output machine-readable JSON
+
+### `smoke-fast`
+
+Quick sanity check: verifies `/health` and `/api/status` endpoints.
+
+```bash
+./run_ops smoke-fast [--timeout 30]
+```
+
+### `smoke-dl`
+
+Deep-learning smoke test: submits a training job and polls until completion.
+
+```bash
+./run_ops smoke-dl [--symbol AAPL] [--model lstm] [--epochs 1] [--timeout 30] [--job-timeout 600]
+```
+
+Options:
+- `--symbol`: Ticker symbol (default: AAPL)
+- `--model`: Model type (default: lstm)
+- `--epochs`: Training epochs (default: 1)
+- `--timeout`: Health check timeout (default: 30s)
+- `--job-timeout`: Job completion timeout (default: 600s)
+
+Output includes:
+- Deep-learning device info (cpu/mps/cuda)
+- Job status updates
+- Model path on success
+- Last 100 logs on failure
+
+## Process Ownership (macOS)
+
+The ops tool detects and manages processes on port 8420:
+
+```bash
+# Inspect port owner
 lsof -nP -iTCP:8420 -sTCP:LISTEN
 ps -p <PID> -o command=
 ```
 
-Safe-kill rule on macOS:
+### Safe-kill Rules
 
-- Kill is allowed only if command contains `-m cli.main server` **and** contains `dPolaris_ai` (case-insensitive path match).
-- If the listener does not match that allowlist, the command does not kill it and returns a clear error.
+By default (`--force`), ops will kill any process on port 8420 in dev mode.
 
-## Backend deep-learning smoke runner
+With `--no-force`, only processes matching the allowlist are killed:
+- Command must contain `-m cli.main server`
+- Command must contain `dpolaris_ai` (case-insensitive)
+
+If a non-allowlisted process is found with `--no-force`, the command fails with a clear error.
+
+## Logs
+
+Ops logs are written to:
+
+```
+~/my-git/dPolaris_ops/.ops_logs/ops_YYYYMMDD.log
+```
+
+Backend logs are written to:
+
+```
+~/dpolaris_data/logs/backend_YYYYMMDD_HHMMSS.log
+```
+
+## Exit Codes
+
+- `0`: Success (PASS)
+- `2`: Failure (FAIL)
+
+## Example Output
+
+### `up`
+
+```text
+PASS backend already healthy at http://127.0.0.1:8420
+```
+
+or
+
+```text
+INFO stopped backend pid(s): 12345
+PASS backend healthy at http://127.0.0.1:8420 (pid=67890, elapsed=3.2s)
+```
+
+### `down`
+
+```text
+INFO no running orchestrator process found
+INFO stopped backend pid(s): 12345
+PASS down complete
+```
+
+### `status`
+
+```text
+Status @ 2025-02-14T19:30:00+00:00
+Base URL: http://127.0.0.1:8420
+Backend health: healthy (healthy)
+Port owners:
+  pid=12345 safe=True cmd=/path/to/python -m cli.main server --host 127.0.0.1 --port 8420
+Orchestrator running: False
+Overall ok: True
+```
+
+### `smoke-dl`
+
+```text
+INFO Deep-learning device: mps
+     torch=True cuda=False mps=True
+INFO queued job id=abc123
+INFO job status: running
+INFO job status: completed
+PASS smoke-dl job completed (id=abc123, status=completed)
+     model_path: /path/to/model.pt
+```
+
+## Windows Usage
+
+For Windows, use the PowerShell scripts in `scripts/` or the `src/ops_cli.py` tool.
+
+See the original sections below for Windows-specific documentation.
+
+---
+
+## Legacy: Backend deep-learning smoke runner (Windows)
 
 Run from `C:\my-git\dPolaris_ops`:
 
@@ -46,145 +203,16 @@ Run from `C:\my-git\dPolaris_ops`:
 python ops_smoke.py
 ```
 
-Expected success output:
-
-```text
-Smoke Summary
-- job_id: <uuid>
-- status: completed
-- model_path: <path or (none)>
-- error: (none)
-```
-
-Expected failure output:
-
-```text
-FAIL: backend is not healthy after 30s (...)
-```
-
-or
-
-```text
-Smoke Summary
-- job_id: <uuid>
-- status: failed
-- model_path: (none)
-- error: <error details>
-```
-
-## Ops CLI (Windows one-liner)
+## Legacy: Ops CLI (Windows one-liner)
 
 ```powershell
 .\.venv\Scripts\python.exe .\src\ops_cli.py smoke --url http://127.0.0.1:8420 --symbol AAPL --model lstm --epochs 1
 ```
 
-Other commands:
-
-```powershell
-.\.venv\Scripts\python.exe .\src\ops_cli.py health --url http://127.0.0.1:8420
-.\.venv\Scripts\python.exe .\src\ops_cli.py wait-healthy --url http://127.0.0.1:8420 --timeout 30
-.\.venv\Scripts\python.exe .\src\ops_cli.py start-backend --ai-root C:\my-git\dpolaris_ai
-.\.venv\Scripts\python.exe .\src\ops_cli.py stop-backend
-```
-
-CLI logs are written to `.\logs\ops_cli_YYYYMMDD.log`.
-
-## How to run smoke
-
-From `C:\my-git\dPolaris_ops`:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\smoke\smoke.ps1
-```
-
-Optional JSON output:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\smoke\smoke.ps1 -Json
-```
-
-The smoke runner validates:
-
-1. `GET /health` (retry up to timeout)
-2. `GET /api/status`
-3. `GET /api/universe/list` (fallback to `/api/scan/universe/list`, WARN if both unavailable)
-4. `POST /api/jobs/deep-learning/train` then polls `GET /api/jobs/{id}` for completion/failure
-
-Exit codes:
-
-- `0`: PASS (WARN allowed)
-- `2`: FAIL (one or more failing checks)
-
-JSON output location when `-Json` is used:
-
-- `.\out\smoke_result.json`
-
-## Doctor tool
-
-## Layout
-
-- `ops/doctor.py`: CLI entrypoint (`python -m ops.doctor`)
-- `ops/checks.py`: ordered checks and classification logic
-- `ops/report.py`: report file generation
-- `ops/tickets.py`: Codex ticket generation
-- `scripts/run_doctor.ps1`: Windows helper script
-
-### Setup (PowerShell)
-
-```powershell
-cd C:\my-git\dPolaris_ops
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-### Run doctor
+## Legacy: Doctor tool
 
 ```powershell
 .\.venv\Scripts\python.exe -m ops.doctor --base-url http://127.0.0.1:8420 --symbol AAPL --model-type lstm --epochs 1 --timeout 300
 ```
 
-Or use:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_doctor.ps1
-```
-
-### Output files
-
-Reports are written to:
-
-`%USERPROFILE%\dpolaris_data\reports\`
-
-- `doctor_report.json`
-- `doctor_report.txt`
-- `tickets\codex1_<timestamp>.txt` (when backend action needed)
-- `tickets\codex2_<timestamp>.txt` (reserved for java-side issues)
-
-### Example console output
-
-```text
-Doctor finished.
-JSON report: C:\Users\you\dpolaris_data\reports\doctor_report.json
-Text report: C:\Users\you\dpolaris_data\reports\doctor_report.txt
-Summary:
-{
-  "ok": false,
-  "reason": "issues detected"
-}
-```
-
-### Check order
-
-1. `GET /health`
-2. `GET /api/status`
-3. `GET /api/deep-learning/status`
-4. `POST /api/jobs/deep-learning/train`
-5. Poll `GET /api/jobs/{job_id}` every 2 seconds
-
-Classifications include:
-
-- `BACKEND_DOWN`
-- `DL_JOB_TIMEOUT`
-- `MISSING_TORCH`
-- `API_CONTRACT_INCONSISTENT`
+Reports are written to `%USERPROFILE%\dpolaris_data\reports\`.

@@ -1,0 +1,27 @@
+#\!/bin/bash
+# dPolaris Ops CLI wrapper
+# Usage: ./run_ops <command> [options]
+#
+# Commands:
+#   up          - Start backend (kill stale processes, wait for health)
+#   down        - Stop backend and orchestrator
+#   status      - Show current status
+#   smoke-fast  - Quick health check
+#   smoke-dl    - Deep-learning smoke test
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Use system Python 3 or fall back to python3
+if command -v python3 &> /dev/null; then
+    PYTHON=python3
+elif command -v python &> /dev/null; then
+    PYTHON=python
+else
+    echo "ERROR: Python 3 not found" >&2
+    exit 1
+fi
+
+cd "$SCRIPT_DIR"
+exec "$PYTHON" -m ops.main "$@"
