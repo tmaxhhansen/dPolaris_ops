@@ -1,6 +1,42 @@
-# dPolaris Ops (Windows)
+# dPolaris Ops
 
 This repo provides lightweight operational testing tools for `dpolaris_ai` and `dpolaris`.
+
+## Mac Ops usage
+
+Run from `~/my-git/dPolaris_ops`:
+
+```bash
+python -m ops.main up
+python -m ops.main down
+python -m ops.main status
+python -m ops.main status --json
+python -m ops.main smoke-fast
+python -m ops.main smoke-dl --symbol AAPL --model lstm --epochs 1 --timeout 30 --job-timeout 600
+```
+
+Command behavior:
+
+- `up`: ensures backend is healthy; starts backend if needed.
+- `down`: stops backend and orchestrator (idempotent).
+- `status`: friendly status output.
+- `status --json`: prints one JSON object to stdout for machine parsing.
+- `smoke-fast`: quick `/health` + `/api/status` checks.
+- `smoke-dl`: enqueues one deep-learning train job and polls until done or timeout.
+
+### Troubleshooting port 8420
+
+`down` and `up` inspect the listener on `8420` with:
+
+```bash
+lsof -nP -iTCP:8420 -sTCP:LISTEN
+ps -p <PID> -o command=
+```
+
+Safe-kill rule on macOS:
+
+- Kill is allowed only if command contains `-m cli.main server` **and** contains `dPolaris_ai` (case-insensitive path match).
+- If the listener does not match that allowlist, the command does not kill it and returns a clear error.
 
 ## Backend deep-learning smoke runner
 

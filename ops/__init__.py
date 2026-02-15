@@ -3,6 +3,7 @@
 __all__ = [
     "checks",
     "doctor",
+    "main",
     "report",
     "tickets",
 ]

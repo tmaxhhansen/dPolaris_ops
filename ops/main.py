@@ -1,0 +1,838 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import subprocess
+import time
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib import error as urlerror
+from urllib import parse as urlparse
+from urllib import request as urlrequest
+
+try:
+    import requests
+except ModuleNotFoundError:
+    requests = None
+
+
+OPS_ROOT = Path(__file__).resolve().parents[1]
+HOME = Path.home()
+RUN_DIR = HOME / "dpolaris_data" / "run"
+LOG_DIR = HOME / "dpolaris_data" / "logs"
+
+BACKEND_PID_FILE = RUN_DIR / "backend.pid"
+ORCHESTRATOR_PID_FILE = RUN_DIR / "orchestrator.pid"
+ORCHESTRATOR_HEARTBEAT_FILE = RUN_DIR / "orchestrator.heartbeat.json"
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8420
+
+SAFE_SERVER_FRAGMENT = "-m cli.main server"
+SAFE_AI_REPO_FRAGMENT = "dpolaris_ai"
+
+HEALTH_OK_STATES = {"healthy", "ok", "running"}
+JOB_SUCCESS_STATES = {"completed", "success"}
+JOB_FAILURE_STATES = {"failed", "error", "cancelled"}
+
+EXIT_OK = 0
+EXIT_FAIL = 2
+
+
+@dataclass
+class HttpResult:
+    ok: bool
+    status: int | None
+    payload: Any
+    error: str
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _run_command(cmd: list[str]) -> tuple[int, str, str]:
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        return 127, "", str(exc)
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def _endpoint(base_url: str, path: str) -> str:
+    return base_url.rstrip("/") + "/" + path.lstrip("/")
+
+
+def _http_requests(method: str, url: str, timeout: int, body: dict[str, Any] | None) -> HttpResult:
+    assert requests is not None
+    try:
+        resp = requests.request(method=method, url=url, timeout=timeout, json=body)
+    except Exception as exc:
+        return HttpResult(False, None, None, str(exc))
+    try:
+        payload = resp.json() if resp.text else {}
+    except Exception:
+        payload = {"raw": resp.text}
+    ok = 200 <= int(resp.status_code) < 300
+    if ok:
+        return HttpResult(True, int(resp.status_code), payload, "")
+    return HttpResult(False, int(resp.status_code), payload, f"HTTP {resp.status_code}")
+
+
+def _http_urllib(method: str, url: str, timeout: int, body: dict[str, Any] | None) -> HttpResult:
+    data = None
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urlrequest.Request(url=url, data=data, method=method, headers=headers)
+    try:
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            payload = json.loads(raw) if raw.strip() else {}
+            return HttpResult(True, int(resp.status), payload, "")
+    except urlerror.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        try:
+            payload = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            payload = {"raw": raw}
+        return HttpResult(False, int(exc.code), payload, f"HTTP {exc.code}")
+    except Exception as exc:
+        return HttpResult(False, None, None, str(exc))
+
+
+def http_json(method: str, url: str, timeout: int = 15, body: dict[str, Any] | None = None) -> HttpResult:
+    if requests is not None:
+        return _http_requests(method, url, timeout, body)
+    return _http_urllib(method, url, timeout, body)
+
+
+def _extract_job_id(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("id", "job_id", "jobId"):
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _extract_job_error(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("error", "detail", "message", "reason"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _status_text(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    status = payload.get("status")
+    if status is None:
+        return ""
+    return str(status).strip().lower()
+
+
+def health_once(base_url: str, timeout: int = 4) -> tuple[bool, str]:
+    result = http_json("GET", _endpoint(base_url, "/health"), timeout=timeout)
+    if not result.ok:
+        return False, result.error or "health request failed"
+    state = _status_text(result.payload)
+    if state and state not in HEALTH_OK_STATES:
+        return False, f"unexpected health status={state}"
+    return True, "healthy"
+
+
+def wait_healthy(base_url: str, timeout_seconds: int) -> tuple[bool, float, str]:
+    started = time.time()
+    deadline = started + max(1, timeout_seconds)
+    last = ""
+    while time.time() < deadline:
+        ok, detail = health_once(base_url)
+        if ok:
+            return True, time.time() - started, detail
+        last = detail
+        time.sleep(0.8)
+    return False, time.time() - started, last or "timeout"
+
+
+def _listening_pids_on_port(port: int) -> tuple[list[int], str]:
+    rc, out, err = _run_command(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"])
+    if rc not in (0, 1):
+        detail = err or out or f"lsof exited with {rc}"
+        return [], detail
+    if not out:
+        return [], ""
+
+    pids: list[int] = []
+    lines = out.splitlines()
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        pid_text = parts[1].strip()
+        if pid_text.isdigit():
+            pids.append(int(pid_text))
+    return sorted(set(pids)), ""
+
+
+def _command_line_for_pid(pid: int) -> str:
+    rc, out, _ = _run_command(["ps", "-p", str(pid), "-o", "command="])
+    if rc != 0:
+        return ""
+    return out.strip()
+
+
+def _is_safe_backend_command(command: str) -> bool:
+    lowered = command.lower()
+    return SAFE_SERVER_FRAGMENT in lowered and SAFE_AI_REPO_FRAGMENT in lowered
+
+
+def _is_process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_pid(pid: int, grace_seconds: int = 8) -> tuple[bool, str]:
+    if not _is_process_alive(pid):
+        return True, "not-running"
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True, "not-running"
+    except PermissionError as exc:
+        return False, f"SIGTERM denied: {exc}"
+
+    deadline = time.time() + max(1, grace_seconds)
+    while time.time() < deadline:
+        if not _is_process_alive(pid):
+            return True, "sigterm"
+        time.sleep(0.2)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True, "sigterm-late"
+    except PermissionError as exc:
+        return False, f"SIGKILL denied: {exc}"
+
+    hard_deadline = time.time() + 3
+    while time.time() < hard_deadline:
+        if not _is_process_alive(pid):
+            return True, "sigkill"
+        time.sleep(0.1)
+    return False, "still-running-after-sigkill"
+
+
+def _collect_port_owners(port: int) -> tuple[list[dict[str, Any]], str]:
+    pids, err = _listening_pids_on_port(port)
+    owners: list[dict[str, Any]] = []
+    for pid in pids:
+        command = _command_line_for_pid(pid)
+        owners.append(
+            {
+                "pid": pid,
+                "command": command,
+                "safe_to_kill": _is_safe_backend_command(command),
+            }
+        )
+    return owners, err
+
+
+def _read_pid_file(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    if not text.isdigit():
+        return None
+    return int(text)
+
+
+def _unlink_if_exists(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _stop_backend_on_port(port: int) -> tuple[bool, str, list[dict[str, Any]]]:
+    owners, inspect_error = _collect_port_owners(port)
+    if inspect_error:
+        return False, f"failed to inspect port {port}: {inspect_error}", owners
+    if not owners:
+        return True, f"no listener on port {port}", owners
+
+    for owner in owners:
+        if owner.get("safe_to_kill"):
+            continue
+        pid = owner["pid"]
+        command = owner.get("command") or "(unknown)"
+        return (
+            False,
+            (
+                f"port {port} owner is NOT allowlisted; refusing to kill pid={pid}. "
+                "Allowlist requires command containing '-m cli.main server' and 'dPolaris_ai'. "
+                f"owner command: {command}"
+            ),
+            owners,
+        )
+
+    failed: list[int] = []
+    for owner in owners:
+        ok, mode = _terminate_pid(int(owner["pid"]), grace_seconds=8)
+        owner["termination"] = mode
+        if not ok:
+            failed.append(int(owner["pid"]))
+
+    if failed:
+        return False, f"failed to stop pid(s): {', '.join(str(p) for p in failed)}", owners
+    return True, f"stopped backend pid(s): {', '.join(str(o['pid']) for o in owners)}", owners
+
+
+def _stop_backend_from_pid_file(excluded: set[int]) -> tuple[bool, str]:
+    pid = _read_pid_file(BACKEND_PID_FILE)
+    if pid is None:
+        return True, ""
+    if pid in excluded:
+        _unlink_if_exists(BACKEND_PID_FILE)
+        return True, ""
+    if not _is_process_alive(pid):
+        _unlink_if_exists(BACKEND_PID_FILE)
+        return True, f"removed stale backend pid file (pid={pid})"
+
+    command = _command_line_for_pid(pid)
+    if not _is_safe_backend_command(command):
+        return (
+            False,
+            (
+                f"backend.pid points to non-allowlisted pid={pid}; refusing to kill. "
+                "Allowlist requires command containing '-m cli.main server' and 'dPolaris_ai'. "
+                f"owner command: {command or '(unknown)'}"
+            ),
+        )
+
+    ok, mode = _terminate_pid(pid, grace_seconds=8)
+    if not ok:
+        return False, f"failed to stop backend pid from pid file: pid={pid}, reason={mode}"
+    _unlink_if_exists(BACKEND_PID_FILE)
+    return True, f"stopped backend pid from pid file: pid={pid} ({mode})"
+
+
+def _list_orchestrator_processes() -> list[dict[str, Any]]:
+    rc, out, _ = _run_command(["ps", "ax", "-o", "pid=,command="])
+    if rc != 0:
+        return []
+
+    current_pid = os.getpid()
+    procs: list[dict[str, Any]] = []
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split(maxsplit=1)
+        if len(parts) < 2:
+            continue
+        pid_text, command = parts[0], parts[1]
+        if not pid_text.isdigit():
+            continue
+        pid = int(pid_text)
+        if pid == current_pid:
+            continue
+        lowered = command.lower()
+        if "-m ops.main" in lowered and "dpolaris_ops" in lowered:
+            procs.append({"pid": pid, "command": command})
+    return sorted(procs, key=lambda item: int(item["pid"]))
+
+
+def _stop_orchestrator_processes() -> dict[str, Any]:
+    targets: dict[int, str] = {}
+    for proc in _list_orchestrator_processes():
+        targets[int(proc["pid"])] = str(proc["command"])
+
+    pid_from_file = _read_pid_file(ORCHESTRATOR_PID_FILE)
+    if pid_from_file is not None and pid_from_file not in targets:
+        targets[pid_from_file] = _command_line_for_pid(pid_from_file)
+
+    results: list[dict[str, Any]] = []
+    for pid in sorted(targets):
+        command = targets[pid]
+        # Only kill known ops orchestrator commands.
+        if not command:
+            results.append({"pid": pid, "killed": False, "reason": "unknown-command", "command": command})
+            continue
+        if "-m ops.main" not in command.lower() and "dpolaris_ops" not in command.lower():
+            results.append({"pid": pid, "killed": False, "reason": "not-ops-main", "command": command})
+            continue
+        ok, mode = _terminate_pid(pid, grace_seconds=5)
+        results.append({"pid": pid, "killed": ok, "reason": mode, "command": command})
+
+    _unlink_if_exists(ORCHESTRATOR_PID_FILE)
+    _unlink_if_exists(ORCHESTRATOR_HEARTBEAT_FILE)
+    return {"targets": results}
+
+
+def _resolve_ai_root(explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit).expanduser().resolve(strict=False)
+
+    candidates: list[Path] = []
+
+    env_root = os.environ.get("DPOLARIS_AI_ROOT")
+    if env_root:
+        return Path(env_root).expanduser().resolve(strict=False)
+
+    candidates.append(OPS_ROOT.parent / "dPolaris_ai")
+    candidates.append(OPS_ROOT.parent / "dpolaris_ai")
+    candidates.append(Path.home() / "my-git" / "dPolaris_ai")
+    candidates.append(Path.home() / "my-git" / "dpolaris_ai")
+
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+
+    for candidate in unique:
+        if candidate.exists():
+            return candidate.resolve()
+    return unique[0].resolve(strict=False)
+
+
+def _find_backend_python(ai_root: Path) -> Path | None:
+    for rel in (".venv/bin/python", ".venv/bin/python3"):
+        candidate = ai_root / rel
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _resolve_host(args: argparse.Namespace) -> str:
+    base_url = getattr(args, "base_url", None)
+    if base_url:
+        parsed = urlparse.urlparse(base_url)
+        if parsed.hostname:
+            return str(parsed.hostname)
+    return str(getattr(args, "host", DEFAULT_HOST))
+
+
+def _resolve_port(args: argparse.Namespace) -> int:
+    base_url = getattr(args, "base_url", None)
+    if base_url:
+        parsed = urlparse.urlparse(base_url)
+        if parsed.port:
+            return int(parsed.port)
+    return int(getattr(args, "port", DEFAULT_PORT))
+
+
+def _resolve_base_url(args: argparse.Namespace) -> str:
+    base_url = getattr(args, "base_url", None)
+    if base_url:
+        return str(base_url).rstrip("/")
+    return f"http://{_resolve_host(args)}:{_resolve_port(args)}"
+
+
+def _tail_file(path: Path, lines: int) -> list[str]:
+    tail = deque(maxlen=max(1, lines))
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                tail.append(line.rstrip("\n"))
+    except Exception:
+        return []
+    return list(tail)
+
+
+def _tail_latest_logs(ai_root: Path | None, lines: int = 30) -> tuple[Path | None, list[str]]:
+    candidates: list[Path] = [LOG_DIR, OPS_ROOT / "logs"]
+    if ai_root is not None:
+        candidates.append(ai_root / "logs")
+
+    files: list[Path] = []
+    for directory in candidates:
+        if not directory.exists():
+            continue
+        try:
+            files.extend([p for p in directory.rglob("*.log") if p.is_file()])
+        except Exception:
+            continue
+    if not files:
+        return None, []
+    latest = max(files, key=lambda p: p.stat().st_mtime)
+    return latest, _tail_file(latest, lines=lines)
+
+
+def _print_failure_logs(job_payload: Any, ai_root: Path | None) -> None:
+    printed = False
+    if isinstance(job_payload, dict):
+        logs = job_payload.get("logs")
+        if isinstance(logs, list) and logs:
+            print("Job logs (last entries):")
+            for item in logs[-10:]:
+                print(f"  {item}")
+            printed = True
+
+    latest, lines = _tail_latest_logs(ai_root=ai_root, lines=30)
+    if latest is not None and lines:
+        print(f"Latest log tail from {latest}:")
+        for line in lines:
+            print(line)
+        printed = True
+
+    if not printed:
+        print("No logs found for failure diagnostics.")
+
+
+def _start_backend(ai_root: Path, host: str, port: int) -> tuple[bool, int | None, Path | None, str]:
+    python_bin = _find_backend_python(ai_root)
+    if python_bin is None:
+        return False, None, None, f"missing backend python: {(ai_root / '.venv/bin/python')}"
+
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / f"backend_{time.strftime('%Y%m%d_%H%M%S')}.log"
+
+    env = os.environ.copy()
+    env["LLM_PROVIDER"] = "none"
+
+    cmd = [str(python_bin), "-m", "cli.main", "server", "--host", host, "--port", str(port)]
+
+    try:
+        with log_path.open("a", encoding="utf-8") as log_file:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(ai_root),
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    except Exception as exc:
+        return False, None, None, str(exc)
+
+    try:
+        BACKEND_PID_FILE.write_text(f"{proc.pid}\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    return True, int(proc.pid), log_path, ""
+
+
+def _remove_runtime_files(remove_backend_pid: bool) -> None:
+    if remove_backend_pid:
+        _unlink_if_exists(BACKEND_PID_FILE)
+    _unlink_if_exists(ORCHESTRATOR_PID_FILE)
+    _unlink_if_exists(ORCHESTRATOR_HEARTBEAT_FILE)
+
+
+def cmd_up(args: argparse.Namespace) -> int:
+    base_url = _resolve_base_url(args)
+    port = _resolve_port(args)
+    host = _resolve_host(args)
+
+    healthy, detail = health_once(base_url)
+    if healthy:
+        print(f"PASS backend already healthy at {base_url}")
+        return EXIT_OK
+
+    owners, inspect_error = _collect_port_owners(port)
+    if inspect_error:
+        print(f"FAIL failed to inspect port {port}: {inspect_error}")
+        return EXIT_FAIL
+    if owners:
+        safe_ok, stop_msg, _ = _stop_backend_on_port(port)
+        if not safe_ok:
+            print(f"FAIL {stop_msg}")
+            return EXIT_FAIL
+        print(f"INFO {stop_msg}")
+
+    ai_root = _resolve_ai_root(args.ai_root)
+    if not ai_root.exists():
+        print(f"FAIL backend repo path does not exist: {ai_root}")
+        return EXIT_FAIL
+
+    started, pid, log_path, start_error = _start_backend(ai_root=ai_root, host=host, port=port)
+    if not started:
+        print(f"FAIL could not start backend: {start_error}")
+        return EXIT_FAIL
+
+    ok, elapsed, wait_detail = wait_healthy(base_url, args.timeout)
+    if ok:
+        print(f"PASS backend healthy at {base_url} (pid={pid}, elapsed={elapsed:.1f}s)")
+        return EXIT_OK
+
+    print(f"FAIL backend failed health check after {args.timeout}s: {wait_detail}")
+    if log_path is not None:
+        print(f"Backend log file: {log_path}")
+    _print_failure_logs(job_payload=None, ai_root=ai_root)
+    return EXIT_FAIL
+
+
+def cmd_down(args: argparse.Namespace) -> int:
+    port = _resolve_port(args)
+    exit_code = EXIT_OK
+
+    orchestrator = _stop_orchestrator_processes()
+    killed_orchestrators = [r for r in orchestrator["targets"] if r.get("killed")]
+    if killed_orchestrators:
+        pids = ", ".join(str(r["pid"]) for r in killed_orchestrators)
+        print(f"INFO stopped orchestrator pid(s): {pids}")
+    else:
+        print("INFO no running orchestrator process found")
+
+    backend_ok, backend_message, owners = _stop_backend_on_port(port)
+    if backend_ok:
+        print(f"INFO {backend_message}")
+    else:
+        exit_code = EXIT_FAIL
+        print(f"FAIL {backend_message}")
+        for owner in owners:
+            print(f"  pid={owner['pid']} safe={owner['safe_to_kill']} cmd={owner['command'] or '(unknown)'}")
+
+    seen_pids = {int(owner["pid"]) for owner in owners}
+    pid_ok, pid_msg = _stop_backend_from_pid_file(excluded=seen_pids)
+    if pid_msg:
+        level = "INFO" if pid_ok else "FAIL"
+        print(f"{level} {pid_msg}")
+    if not pid_ok:
+        exit_code = EXIT_FAIL
+
+    _remove_runtime_files(remove_backend_pid=(exit_code == EXIT_OK))
+    if exit_code == EXIT_OK:
+        print("PASS down complete")
+    return exit_code
+
+
+def _build_status_payload(base_url: str, port: int) -> dict[str, Any]:
+    healthy, health_detail = health_once(base_url)
+    owners, inspect_error = _collect_port_owners(port)
+    orchestrator_procs = _list_orchestrator_processes()
+
+    payload: dict[str, Any] = {
+        "timestamp": _now_iso(),
+        "base_url": base_url,
+        "port": port,
+        "ok": healthy,
+        "backend": {
+            "healthy": healthy,
+            "health_detail": health_detail,
+            "listening_owners": owners,
+            "pid_file": str(BACKEND_PID_FILE),
+            "pid_file_pid": _read_pid_file(BACKEND_PID_FILE),
+        },
+        "orchestrator": {
+            "running": bool(orchestrator_procs),
+            "processes": orchestrator_procs,
+            "pid_file": str(ORCHESTRATOR_PID_FILE),
+            "pid_file_pid": _read_pid_file(ORCHESTRATOR_PID_FILE),
+        },
+        "errors": [],
+    }
+    if inspect_error:
+        payload["errors"].append(f"lsof inspection failed: {inspect_error}")
+    return payload
+
+
+def _print_status_human(payload: dict[str, Any]) -> None:
+    backend = payload["backend"]
+    orchestrator = payload["orchestrator"]
+    owners = backend.get("listening_owners", [])
+
+    print(f"Status @ {payload['timestamp']}")
+    print(f"Base URL: {payload['base_url']}")
+    print(
+        f"Backend health: {'healthy' if backend.get('healthy') else 'unhealthy'} "
+        f"({backend.get('health_detail')})"
+    )
+    if owners:
+        print("Port owners:")
+        for owner in owners:
+            print(f"  pid={owner['pid']} safe={owner['safe_to_kill']} cmd={owner['command'] or '(unknown)'}")
+    else:
+        print("Port owners: none")
+
+    print(f"Orchestrator running: {orchestrator.get('running')}")
+    if orchestrator.get("processes"):
+        for proc in orchestrator["processes"]:
+            print(f"  pid={proc['pid']} cmd={proc['command']}")
+
+    if payload["errors"]:
+        print("Errors:")
+        for item in payload["errors"]:
+            print(f"  {item}")
+
+    print(f"Overall ok: {payload['ok']}")
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    base_url = _resolve_base_url(args)
+    port = _resolve_port(args)
+    payload = _build_status_payload(base_url=base_url, port=port)
+    if args.json:
+        print(json.dumps(payload, separators=(",", ":")))
+        return EXIT_OK
+    _print_status_human(payload)
+    return EXIT_OK
+
+
+def cmd_smoke_fast(args: argparse.Namespace) -> int:
+    base_url = _resolve_base_url(args)
+    ok, elapsed, detail = wait_healthy(base_url, args.timeout)
+    if not ok:
+        print(f"FAIL /health not ready after {elapsed:.1f}s: {detail}")
+        return EXIT_FAIL
+
+    status_result = http_json("GET", _endpoint(base_url, "/api/status"), timeout=20)
+    if not status_result.ok or not isinstance(status_result.payload, dict):
+        err = status_result.error or "invalid /api/status response"
+        print(f"FAIL GET /api/status: {err}")
+        return EXIT_FAIL
+
+    print("PASS smoke-fast")
+    print(f"  /health: healthy (elapsed={elapsed:.1f}s)")
+    print("  /api/status: ok")
+    return EXIT_OK
+
+
+def cmd_smoke_dl(args: argparse.Namespace) -> int:
+    base_url = _resolve_base_url(args)
+    ai_root = _resolve_ai_root(args.ai_root)
+
+    ok, elapsed, detail = wait_healthy(base_url, args.timeout)
+    if not ok:
+        print(f"FAIL /health not ready after {elapsed:.1f}s: {detail}")
+        _print_failure_logs(job_payload=None, ai_root=ai_root)
+        return EXIT_FAIL
+
+    enqueue = http_json(
+        "POST",
+        _endpoint(base_url, "/api/jobs/deep-learning/train"),
+        timeout=30,
+        body={"symbol": args.symbol, "model_type": args.model, "epochs": args.epochs},
+    )
+    if not enqueue.ok:
+        print(f"FAIL enqueue deep-learning job: {enqueue.error}")
+        if enqueue.payload is not None:
+            print(json.dumps(enqueue.payload, indent=2))
+        _print_failure_logs(job_payload=enqueue.payload, ai_root=ai_root)
+        return EXIT_FAIL
+
+    job_id = _extract_job_id(enqueue.payload)
+    if not job_id:
+        print("FAIL enqueue deep-learning job: missing job id")
+        print(json.dumps(enqueue.payload, indent=2))
+        _print_failure_logs(job_payload=enqueue.payload, ai_root=ai_root)
+        return EXIT_FAIL
+
+    print(f"INFO queued job id={job_id}")
+    deadline = time.time() + max(5, args.job_timeout)
+    last_payload: Any = {}
+    last_error = ""
+
+    while time.time() < deadline:
+        poll = http_json("GET", _endpoint(base_url, f"/api/jobs/{job_id}"), timeout=20)
+        if not poll.ok:
+            last_error = poll.error
+            time.sleep(2)
+            continue
+        if not isinstance(poll.payload, dict):
+            last_error = "job poll payload is not JSON object"
+            time.sleep(2)
+            continue
+
+        last_payload = poll.payload
+        state = _status_text(last_payload)
+        if state in JOB_SUCCESS_STATES:
+            print(f"PASS smoke-dl job completed (id={job_id}, status={state})")
+            return EXIT_OK
+        if state in JOB_FAILURE_STATES:
+            error_text = _extract_job_error(last_payload) or "job failed"
+            print(f"FAIL smoke-dl job failed (id={job_id}): {error_text}")
+            print(json.dumps(last_payload, indent=2))
+            _print_failure_logs(job_payload=last_payload, ai_root=ai_root)
+            return EXIT_FAIL
+        time.sleep(2)
+
+    print(f"FAIL smoke-dl timeout after {args.job_timeout}s (id={job_id})")
+    if last_error:
+        print(f"Last poll error: {last_error}")
+    if isinstance(last_payload, dict) and last_payload:
+        print(json.dumps(last_payload, indent=2))
+    _print_failure_logs(job_payload=last_payload, ai_root=ai_root)
+    return EXIT_FAIL
+
+
+def _add_connection_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--base-url", default=None, help="Backend base URL, overrides --host/--port")
+    parser.add_argument("--host", default=DEFAULT_HOST, help="Backend host")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Backend port")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="ops", description="dPolaris macOS ops orchestrator CLI")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_up = sub.add_parser("up", help="Ensure backend is healthy (start if needed)")
+    _add_connection_args(p_up)
+    p_up.add_argument("--ai-root", default=None, help="Path to dPolaris_ai repo")
+    p_up.add_argument("--timeout", type=int, default=30, help="Seconds to wait for backend health after start")
+    p_up.set_defaults(func=cmd_up)
+
+    p_down = sub.add_parser("down", help="Stop backend and orchestrator")
+    _add_connection_args(p_down)
+    p_down.set_defaults(func=cmd_down)
+
+    p_status = sub.add_parser("status", help="Print backend/orchestrator status")
+    _add_connection_args(p_status)
+    p_status.add_argument("--json", action="store_true", help="Print single JSON status object")
+    p_status.set_defaults(func=cmd_status)
+
+    p_smoke_fast = sub.add_parser("smoke-fast", help="Quick sanity checks")
+    _add_connection_args(p_smoke_fast)
+    p_smoke_fast.add_argument("--timeout", type=int, default=30, help="Seconds to wait for /health")
+    p_smoke_fast.set_defaults(func=cmd_smoke_fast)
+
+    p_smoke_dl = sub.add_parser("smoke-dl", help="Run deep-learning smoke job")
+    _add_connection_args(p_smoke_dl)
+    p_smoke_dl.add_argument("--symbol", default="AAPL", help="Ticker symbol")
+    p_smoke_dl.add_argument("--model", default="lstm", help="Model type")
+    p_smoke_dl.add_argument("--epochs", type=int, default=1, help="Training epochs")
+    p_smoke_dl.add_argument("--timeout", type=int, default=30, help="Seconds to wait for /health")
+    p_smoke_dl.add_argument("--job-timeout", type=int, default=600, help="Seconds to wait for job completion")
+    p_smoke_dl.add_argument("--ai-root", default=None, help="Path to dPolaris_ai repo for log fallback")
+    p_smoke_dl.set_defaults(func=cmd_smoke_dl)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
