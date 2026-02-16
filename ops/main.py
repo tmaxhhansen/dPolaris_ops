@@ -227,7 +227,10 @@ def _command_line_for_pid(pid: int) -> str:
 
 def _is_safe_backend_command(command: str) -> bool:
     lowered = (command or "").lower()
-    return SAFE_SERVER_FRAGMENT in lowered
+    if SAFE_SERVER_FRAGMENT in lowered or "cli.main server" in lowered:
+        return True
+    # Allow local dev venv python wrappers that still belong to dpolaris_ai.
+    return ("python" in lowered and "dpolaris_ai" in lowered and ".venv" in lowered)
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -726,14 +729,14 @@ def cmd_universe_rebuild(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return EXIT_FAIL
 
-    names = ["nasdaq500", "wsb100", "combined"]
+    names = ["nasdaq500", "watchlist", "combined"]
     for name in names:
         check = http_json("GET", _endpoint(base_url, f"/api/universe/{name}"), timeout=30)
         if not check.ok:
             print(f"FAIL GET /api/universe/{name}: {check.error}")
             return EXIT_FAIL
         count = _universe_count_from_payload(check.payload)
-        if count <= 0:
+        if name != "watchlist" and count <= 0:
             print(f"FAIL /api/universe/{name} returned 0 tickers after rebuild")
             return EXIT_FAIL
         print(f"PASS /api/universe/{name} count={count}")
@@ -930,7 +933,7 @@ def cmd_smoke_universe(args: argparse.Namespace) -> int:
         _ops_log(f"smoke-universe FAIL: /health not ready: {detail}")
         return EXIT_FAIL
 
-    required = ["nasdaq500", "wsb100", "combined", "custom"]
+    required = ["nasdaq500", "watchlist", "combined"]
     list_result = http_json("GET", _endpoint(base_url, "/api/universe/list"), timeout=20)
     if not list_result.ok:
         print(f"FAIL GET /api/universe/list: {list_result.error}")
@@ -962,7 +965,7 @@ def cmd_smoke_universe(args: argparse.Namespace) -> int:
             return EXIT_FAIL
 
         ticker_count = _universe_count_from_payload(result.payload)
-        if name != "custom" and ticker_count <= 0:
+        if name != "watchlist" and ticker_count <= 0:
             print(f"FAIL /api/universe/{name} returned no tickers")
             _ops_log(f"smoke-universe FAIL: /api/universe/{name} empty")
             return EXIT_FAIL
@@ -971,43 +974,43 @@ def cmd_smoke_universe(args: argparse.Namespace) -> int:
         core_counts[name] = ticker_count
         print(f"PASS /api/universe/{name} count={ticker_count}")
 
-    custom_symbol = f"ZZCSTM{int(time.time()) % 1000:03d}"
+    watch_symbol = f"ZZWCH{int(time.time()) % 1000:03d}"
     add_result = http_json(
         "POST",
-        _endpoint(base_url, "/api/universe/custom/add"),
+        _endpoint(base_url, f"/api/watchlist/add?symbol={watch_symbol}"),
         timeout=20,
-        body={"symbol": custom_symbol},
+        body={"symbol": watch_symbol},
     )
     if not add_result.ok:
-        print(f"FAIL POST /api/universe/custom/add: {add_result.error}")
-        _ops_log(f"smoke-universe FAIL: custom/add {add_result.error}")
+        print(f"FAIL POST /api/watchlist/add: {add_result.error}")
+        _ops_log(f"smoke-universe FAIL: watchlist/add {add_result.error}")
         return EXIT_FAIL
-    print(f"PASS /api/universe/custom/add symbol={custom_symbol}")
+    print(f"PASS /api/watchlist/add symbol={watch_symbol}")
 
     try:
-        custom_after = http_json("GET", _endpoint(base_url, "/api/universe/custom"), timeout=20)
-        if not custom_after.ok:
-            print(f"FAIL GET /api/universe/custom after add: {custom_after.error}")
-            _ops_log(f"smoke-universe FAIL: custom fetch after add {custom_after.error}")
+        watch_after = http_json("GET", _endpoint(base_url, "/api/universe/watchlist"), timeout=20)
+        if not watch_after.ok:
+            print(f"FAIL GET /api/universe/watchlist after add: {watch_after.error}")
+            _ops_log(f"smoke-universe FAIL: watchlist fetch after add {watch_after.error}")
             return EXIT_FAIL
-        custom_symbols = _universe_symbol_set(custom_after.payload)
-        if custom_symbol not in custom_symbols:
-            print(f"FAIL /api/universe/custom missing added symbol: {custom_symbol}")
-            _ops_log("smoke-universe FAIL: custom missing added symbol")
+        watch_symbols = _universe_symbol_set(watch_after.payload)
+        if watch_symbol not in watch_symbols:
+            print(f"FAIL /api/universe/watchlist missing added symbol: {watch_symbol}")
+            _ops_log("smoke-universe FAIL: watchlist missing added symbol")
             return EXIT_FAIL
-        print(f"PASS /api/universe/custom contains {custom_symbol}")
+        print(f"PASS /api/universe/watchlist contains {watch_symbol}")
 
         combined_after = http_json("GET", _endpoint(base_url, "/api/universe/combined"), timeout=20)
         if not combined_after.ok:
-            print(f"FAIL GET /api/universe/combined after custom add: {combined_after.error}")
-            _ops_log(f"smoke-universe FAIL: combined fetch after custom add {combined_after.error}")
+            print(f"FAIL GET /api/universe/combined after watchlist add: {combined_after.error}")
+            _ops_log(f"smoke-universe FAIL: combined fetch after watchlist add {combined_after.error}")
             return EXIT_FAIL
         combined_symbols = _universe_symbol_set(combined_after.payload)
-        if custom_symbol not in combined_symbols:
-            print(f"FAIL /api/universe/combined missing custom symbol: {custom_symbol}")
-            _ops_log("smoke-universe FAIL: combined missing custom symbol")
+        if watch_symbol not in combined_symbols:
+            print(f"FAIL /api/universe/combined missing watchlist symbol: {watch_symbol}")
+            _ops_log("smoke-universe FAIL: combined missing watchlist symbol")
             return EXIT_FAIL
-        print(f"PASS /api/universe/combined includes custom symbol {custom_symbol}")
+        print(f"PASS /api/universe/combined includes watchlist symbol {watch_symbol}")
 
         analysis_result = http_json("GET", _endpoint(base_url, "/api/analysis/list?limit=20"), timeout=20)
         if analysis_result.ok:
@@ -1033,14 +1036,14 @@ def cmd_smoke_universe(args: argparse.Namespace) -> int:
     finally:
         remove_result = http_json(
             "POST",
-            _endpoint(base_url, "/api/universe/custom/remove"),
+            _endpoint(base_url, f"/api/watchlist/remove?symbol={watch_symbol}"),
             timeout=20,
-            body={"symbol": custom_symbol},
+            body={"symbol": watch_symbol},
         )
         if remove_result.ok:
-            print(f"PASS /api/universe/custom/remove symbol={custom_symbol}")
+            print(f"PASS /api/watchlist/remove symbol={watch_symbol}")
         else:
-            print(f"WARN cleanup remove failed for {custom_symbol}: {remove_result.error}")
+            print(f"WARN cleanup remove failed for {watch_symbol}: {remove_result.error}")
 
     _ops_log("smoke-universe PASS")
     return EXIT_OK
@@ -1341,9 +1344,38 @@ def _verify_analysis_after_dl(base_url: str, symbol: str, ai_root: Path | None, 
         errors.append(f"/api/analysis/detail/{symbol}: artifacts array is empty (expected >= 1)")
         return False, errors
 
+    # Check /api/analysis/list contains this symbol.
+    list_url = _endpoint(base_url, "/api/analysis/list?limit=200")
+    list_result = http_json("GET", list_url, timeout=20)
+    if not list_result.ok:
+        errors.append(f"GET /api/analysis/list failed: {list_result.error}")
+        return False, errors
+
+    items: list[Any]
+    if isinstance(list_result.payload, list):
+        items = list_result.payload
+    elif isinstance(list_result.payload, dict):
+        candidate = list_result.payload.get("items")
+        items = candidate if isinstance(candidate, list) else []
+    else:
+        items = []
+
+    found = False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        row_symbol = str(item.get("symbol") or item.get("ticker") or "").strip().upper()
+        if row_symbol == symbol.upper():
+            found = True
+            break
+    if not found:
+        errors.append(f"/api/analysis/list does not contain {symbol} after training")
+        return False, errors
+
     return True, [
         f"  /api/analysis/last: {symbol}.last_analysis_at = {last_at}",
         f"  /api/analysis/detail/{symbol}: artifacts count = {len(artifacts)}",
+        f"  /api/analysis/list: contains {symbol}",
     ]
 
 

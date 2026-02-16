@@ -19,7 +19,7 @@ From `~/my-git/dPolaris_ops`:
 # Quick smoke test (health + status endpoints)
 ./run_ops smoke-fast
 
-# Universe smoke test (list + nasdaq500/wsb100/combined/custom + custom add/remove)
+# Universe smoke test (list + nasdaq500/watchlist/combined + watchlist add/remove)
 ./run_ops smoke-universe
 
 # Force universe rebuild then verify non-empty payloads
@@ -98,14 +98,13 @@ Quick sanity check: verifies `/health` and `/api/status` endpoints.
 
 ### `smoke-universe`
 
-Verifies universe endpoints return non-empty data:
+Verifies universe endpoints return expected data:
 - `GET /api/universe/list`
 - `GET /api/universe/nasdaq500`
-- `GET /api/universe/wsb100`
+- `GET /api/universe/watchlist`
 - `GET /api/universe/combined`
-- `GET /api/universe/custom`
-- `POST /api/universe/custom/add` then validate custom/combined inclusion
-- `POST /api/universe/custom/remove` cleanup
+- `POST /api/watchlist/add` then validate watchlist/combined inclusion
+- `POST /api/watchlist/remove` cleanup
 
 ```bash
 ./run_ops smoke-universe [--timeout 30]
@@ -117,7 +116,7 @@ Runs:
 - `POST /api/universe/rebuild`
 - verifies:
   - `GET /api/universe/nasdaq500`
-  - `GET /api/universe/wsb100`
+  - `GET /api/universe/watchlist`
   - `GET /api/universe/combined`
 
 ```bash
