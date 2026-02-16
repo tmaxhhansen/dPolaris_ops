@@ -726,7 +726,7 @@ def cmd_universe_rebuild(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return EXIT_FAIL
 
-    names = ["nasdaq300", "wsb100", "combined400"]
+    names = ["nasdaq500", "wsb100", "combined"]
     for name in names:
         check = http_json("GET", _endpoint(base_url, f"/api/universe/{name}"), timeout=30)
         if not check.ok:
@@ -880,6 +880,46 @@ def _universe_count_from_payload(payload: Any) -> int:
     return 0
 
 
+def _universe_rows_from_payload(payload: Any) -> list[Any]:
+    if isinstance(payload, list):
+        return list(payload)
+    if isinstance(payload, dict):
+        for key in ("tickers", "merged", "items", "rows", "data"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return list(value)
+        nested = payload.get("universe")
+        if nested is not None:
+            return _universe_rows_from_payload(nested)
+    return []
+
+
+def _universe_symbol_set(payload: Any) -> set[str]:
+    out: set[str] = set()
+    for item in _universe_rows_from_payload(payload):
+        if isinstance(item, dict):
+            raw = item.get("symbol") or item.get("ticker") or item.get("id")
+        else:
+            raw = item
+        symbol = str(raw or "").strip().upper()
+        if symbol:
+            out.add(symbol)
+    return out
+
+
+def _row_last_analysis_date(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    for key in ("last_analysis_date", "analysis_date", "last_analysis_at"):
+        value = row.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
 def cmd_smoke_universe(args: argparse.Namespace) -> int:
     base_url = _resolve_base_url(args)
     _ops_log(f"CMD smoke-universe: base_url={base_url}")
@@ -890,7 +930,7 @@ def cmd_smoke_universe(args: argparse.Namespace) -> int:
         _ops_log(f"smoke-universe FAIL: /health not ready: {detail}")
         return EXIT_FAIL
 
-    required = ["nasdaq300", "wsb100", "combined400"]
+    required = ["nasdaq500", "wsb100", "combined", "custom"]
     list_result = http_json("GET", _endpoint(base_url, "/api/universe/list"), timeout=20)
     if not list_result.ok:
         print(f"FAIL GET /api/universe/list: {list_result.error}")
@@ -912,6 +952,8 @@ def cmd_smoke_universe(args: argparse.Namespace) -> int:
     print("PASS /api/universe/list")
     print(f"  names={names}")
 
+    core_counts: dict[str, int] = {}
+    payloads: dict[str, Any] = {}
     for name in required:
         result = http_json("GET", _endpoint(base_url, f"/api/universe/{name}"), timeout=20)
         if not result.ok:
@@ -920,12 +962,85 @@ def cmd_smoke_universe(args: argparse.Namespace) -> int:
             return EXIT_FAIL
 
         ticker_count = _universe_count_from_payload(result.payload)
-        if ticker_count <= 0:
+        if name != "custom" and ticker_count <= 0:
             print(f"FAIL /api/universe/{name} returned no tickers")
             _ops_log(f"smoke-universe FAIL: /api/universe/{name} empty")
             return EXIT_FAIL
 
+        payloads[name] = result.payload
+        core_counts[name] = ticker_count
         print(f"PASS /api/universe/{name} count={ticker_count}")
+
+    custom_symbol = f"ZZCSTM{int(time.time()) % 1000:03d}"
+    add_result = http_json(
+        "POST",
+        _endpoint(base_url, "/api/universe/custom/add"),
+        timeout=20,
+        body={"symbol": custom_symbol},
+    )
+    if not add_result.ok:
+        print(f"FAIL POST /api/universe/custom/add: {add_result.error}")
+        _ops_log(f"smoke-universe FAIL: custom/add {add_result.error}")
+        return EXIT_FAIL
+    print(f"PASS /api/universe/custom/add symbol={custom_symbol}")
+
+    try:
+        custom_after = http_json("GET", _endpoint(base_url, "/api/universe/custom"), timeout=20)
+        if not custom_after.ok:
+            print(f"FAIL GET /api/universe/custom after add: {custom_after.error}")
+            _ops_log(f"smoke-universe FAIL: custom fetch after add {custom_after.error}")
+            return EXIT_FAIL
+        custom_symbols = _universe_symbol_set(custom_after.payload)
+        if custom_symbol not in custom_symbols:
+            print(f"FAIL /api/universe/custom missing added symbol: {custom_symbol}")
+            _ops_log("smoke-universe FAIL: custom missing added symbol")
+            return EXIT_FAIL
+        print(f"PASS /api/universe/custom contains {custom_symbol}")
+
+        combined_after = http_json("GET", _endpoint(base_url, "/api/universe/combined"), timeout=20)
+        if not combined_after.ok:
+            print(f"FAIL GET /api/universe/combined after custom add: {combined_after.error}")
+            _ops_log(f"smoke-universe FAIL: combined fetch after custom add {combined_after.error}")
+            return EXIT_FAIL
+        combined_symbols = _universe_symbol_set(combined_after.payload)
+        if custom_symbol not in combined_symbols:
+            print(f"FAIL /api/universe/combined missing custom symbol: {custom_symbol}")
+            _ops_log("smoke-universe FAIL: combined missing custom symbol")
+            return EXIT_FAIL
+        print(f"PASS /api/universe/combined includes custom symbol {custom_symbol}")
+
+        analysis_result = http_json("GET", _endpoint(base_url, "/api/analysis/list?limit=20"), timeout=20)
+        if analysis_result.ok:
+            analysis_payload = analysis_result.payload
+            if isinstance(analysis_payload, list):
+                analysis_items = analysis_payload
+            elif isinstance(analysis_payload, dict):
+                candidate = analysis_payload.get("items")
+                analysis_items = candidate if isinstance(candidate, list) else []
+            else:
+                analysis_items = []
+
+            if analysis_items:
+                combined_rows = _universe_rows_from_payload(combined_after.payload)
+                has_analysis_date = any(_row_last_analysis_date(row) for row in combined_rows)
+                if not has_analysis_date:
+                    print("FAIL combined universe has no last_analysis_date values despite existing analyses")
+                    _ops_log("smoke-universe FAIL: missing last_analysis_date propagation")
+                    return EXIT_FAIL
+                print("PASS combined universe includes last_analysis_date metadata")
+        else:
+            print(f"WARN /api/analysis/list unavailable: {analysis_result.error}")
+    finally:
+        remove_result = http_json(
+            "POST",
+            _endpoint(base_url, "/api/universe/custom/remove"),
+            timeout=20,
+            body={"symbol": custom_symbol},
+        )
+        if remove_result.ok:
+            print(f"PASS /api/universe/custom/remove symbol={custom_symbol}")
+        else:
+            print(f"WARN cleanup remove failed for {custom_symbol}: {remove_result.error}")
 
     _ops_log("smoke-universe PASS")
     return EXIT_OK
@@ -1517,6 +1632,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_smoke_dl.add_argument("--job-timeout", type=int, default=600, help="Seconds to wait for job completion")
     p_smoke_dl.add_argument("--ai-root", default=None, help="Path to dPolaris_ai repo for log fallback")
     p_smoke_dl.set_defaults(func=cmd_smoke_dl)
+
+    # Backward-compatible alias.
+    p_smoke = sub.add_parser("smoke", help="Alias for smoke-dl")
+    _add_connection_args(p_smoke)
+    p_smoke.add_argument("--symbol", default="AAPL", help="Ticker symbol")
+    p_smoke.add_argument("--model", default="lstm", help="Model type")
+    p_smoke.add_argument("--epochs", type=int, default=1, help="Training epochs")
+    p_smoke.add_argument("--timeout", type=int, default=30, help="Seconds to wait for /health")
+    p_smoke.add_argument("--job-timeout", type=int, default=600, help="Seconds to wait for job completion")
+    p_smoke.add_argument("--ai-root", default=None, help="Path to dPolaris_ai repo for log fallback")
+    p_smoke.set_defaults(func=cmd_smoke_dl)
 
     p_demo = sub.add_parser("demo", help="Run full demo workflow (up + smoke-metadata + smoke-dl)")
     _add_connection_args(p_demo)

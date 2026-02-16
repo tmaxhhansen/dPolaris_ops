@@ -19,7 +19,7 @@ From `~/my-git/dPolaris_ops`:
 # Quick smoke test (health + status endpoints)
 ./run_ops smoke-fast
 
-# Universe smoke test (list + nasdaq300/wsb100/combined400 non-empty)
+# Universe smoke test (list + nasdaq500/wsb100/combined/custom + custom add/remove)
 ./run_ops smoke-universe
 
 # Force universe rebuild then verify non-empty payloads
@@ -100,9 +100,12 @@ Quick sanity check: verifies `/health` and `/api/status` endpoints.
 
 Verifies universe endpoints return non-empty data:
 - `GET /api/universe/list`
-- `GET /api/universe/nasdaq300`
+- `GET /api/universe/nasdaq500`
 - `GET /api/universe/wsb100`
-- `GET /api/universe/combined400`
+- `GET /api/universe/combined`
+- `GET /api/universe/custom`
+- `POST /api/universe/custom/add` then validate custom/combined inclusion
+- `POST /api/universe/custom/remove` cleanup
 
 ```bash
 ./run_ops smoke-universe [--timeout 30]
@@ -113,9 +116,9 @@ Verifies universe endpoints return non-empty data:
 Runs:
 - `POST /api/universe/rebuild`
 - verifies:
-  - `GET /api/universe/nasdaq300`
+  - `GET /api/universe/nasdaq500`
   - `GET /api/universe/wsb100`
-  - `GET /api/universe/combined400`
+  - `GET /api/universe/combined`
 
 ```bash
 ./run_ops universe-rebuild [--timeout 30] [--force]
@@ -158,6 +161,12 @@ Deep-learning smoke test: submits a training job and polls until completion.
 
 ```bash
 ./run_ops smoke-dl [--symbol AAPL] [--model lstm] [--epochs 1] [--timeout 30] [--job-timeout 600]
+```
+
+Alias:
+
+```bash
+./run_ops smoke [--symbol AAPL] [--model lstm] [--epochs 1] [--timeout 30] [--job-timeout 600]
 ```
 
 Options:
