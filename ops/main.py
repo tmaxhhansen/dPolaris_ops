@@ -41,6 +41,16 @@ SAFE_AI_REPO_FRAGMENT = "dpolaris_ai"
 HEALTH_OK_STATES = {"healthy", "ok", "running"}
 JOB_SUCCESS_STATES = {"completed", "success"}
 JOB_FAILURE_STATES = {"failed", "error", "cancelled"}
+REQUIRED_REPORT_HEADINGS = [
+    "## Overview",
+    "## Price/Volume Snapshot",
+    "## Technical Indicators",
+    "## Chart Patterns",
+    "## Model Signals",
+    "## News",
+    "## Risk Notes",
+    "## Next Steps",
+]
 
 EXIT_OK = 0
 EXIT_FAIL = 2
@@ -874,6 +884,84 @@ def cmd_smoke_universe(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_report_smoke(args: argparse.Namespace) -> int:
+    base_url = _resolve_base_url(args)
+    symbol = str(getattr(args, "symbol", "AAPL") or "AAPL").strip().upper()
+    _ops_log(f"CMD report-smoke: base_url={base_url} symbol={symbol}")
+
+    ok, elapsed, detail = wait_healthy(base_url, args.timeout)
+    if not ok:
+        print(f"FAIL /health not ready after {elapsed:.1f}s: {detail}")
+        _ops_log(f"report-smoke FAIL: /health not ready: {detail}")
+        return EXIT_FAIL
+
+    report_result = http_json(
+        "POST",
+        _endpoint(base_url, f"/api/analyze/report?symbol={urlparse.quote(symbol)}"),
+        timeout=90,
+        body={},
+    )
+    if not report_result.ok or not isinstance(report_result.payload, dict):
+        err = report_result.error or "invalid report response"
+        print(f"FAIL POST /api/analyze/report: {err}")
+        _ops_log(f"report-smoke FAIL: /api/analyze/report: {err}")
+        return EXIT_FAIL
+
+    report_payload = report_result.payload
+    report_text = str(report_payload.get("report_text") or "")
+    missing = [heading for heading in REQUIRED_REPORT_HEADINGS if heading not in report_text]
+    if missing:
+        print(f"FAIL report missing sections: {missing}")
+        _ops_log(f"report-smoke FAIL: missing sections {missing}")
+        return EXIT_FAIL
+
+    print("PASS /api/analyze/report")
+    print(f"  symbol={symbol}")
+    print(f"  report_id={report_payload.get('id')}")
+
+    list_result = http_json("GET", _endpoint(base_url, "/api/analysis/list?limit=20"), timeout=20)
+    if not list_result.ok or not isinstance(list_result.payload, list):
+        err = list_result.error or "invalid list response"
+        print(f"FAIL GET /api/analysis/list: {err}")
+        _ops_log(f"report-smoke FAIL: /api/analysis/list: {err}")
+        return EXIT_FAIL
+
+    if not list_result.payload:
+        print("FAIL /api/analysis/list returned empty")
+        _ops_log("report-smoke FAIL: analysis list empty")
+        return EXIT_FAIL
+
+    analysis_id = str(report_payload.get("id") or "").strip()
+    if not analysis_id:
+        first = list_result.payload[0]
+        if isinstance(first, dict):
+            analysis_id = str(first.get("id") or "").strip()
+
+    if not analysis_id:
+        print("FAIL could not resolve analysis id")
+        _ops_log("report-smoke FAIL: missing analysis id")
+        return EXIT_FAIL
+
+    detail_result = http_json("GET", _endpoint(base_url, f"/api/analysis/{analysis_id}"), timeout=20)
+    if not detail_result.ok or not isinstance(detail_result.payload, dict):
+        err = detail_result.error or "invalid detail response"
+        print(f"FAIL GET /api/analysis/{analysis_id}: {err}")
+        _ops_log(f"report-smoke FAIL: /api/analysis/{analysis_id}: {err}")
+        return EXIT_FAIL
+
+    detail_report = str(detail_result.payload.get("report_text") or "")
+    if not detail_report.strip():
+        print(f"FAIL /api/analysis/{analysis_id} missing report_text")
+        _ops_log(f"report-smoke FAIL: /api/analysis/{analysis_id} missing report_text")
+        return EXIT_FAIL
+
+    print("PASS /api/analysis/list")
+    print(f"  count={len(list_result.payload)}")
+    print(f"PASS /api/analysis/{analysis_id}")
+    _ops_log("report-smoke PASS")
+    return EXIT_OK
+
+
 def _get_device_info(base_url: str) -> dict[str, Any]:
     """Fetch deep-learning device information from the backend."""
     result = http_json("GET", _endpoint(base_url, "/api/deep-learning/status"), timeout=10)
@@ -1306,6 +1394,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_connection_args(p_smoke_universe)
     p_smoke_universe.add_argument("--timeout", type=int, default=30, help="Seconds to wait for /health")
     p_smoke_universe.set_defaults(func=cmd_smoke_universe)
+
+    p_report_smoke = sub.add_parser("report-smoke", help="Generate and validate a multi-section analysis report")
+    _add_connection_args(p_report_smoke)
+    p_report_smoke.add_argument("--symbol", default="AAPL", help="Ticker symbol")
+    p_report_smoke.add_argument("--timeout", type=int, default=30, help="Seconds to wait for /health")
+    p_report_smoke.set_defaults(func=cmd_report_smoke)
 
     p_smoke_metadata = sub.add_parser("smoke-metadata", help="Test metadata and analysis endpoints")
     _add_connection_args(p_smoke_metadata)

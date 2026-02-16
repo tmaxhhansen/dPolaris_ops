@@ -8,6 +8,7 @@
 #   status      - Show current status
 #   smoke-fast  - Quick health check
 #   smoke-universe - Verify universe endpoints and non-empty ticker lists
+#   report-smoke - Generate and validate analysis report artifacts
 #   smoke-dl    - Deep-learning smoke test
 
 set -e

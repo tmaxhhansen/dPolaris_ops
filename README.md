@@ -22,6 +22,9 @@ From `~/my-git/dPolaris_ops`:
 # Universe smoke test (list + nasdaq300/wsb100/combined non-empty)
 ./run_ops smoke-universe
 
+# Multi-section report smoke test (generate + validate artifact persistence)
+./run_ops report-smoke --symbol AAPL
+
 # Deep-learning smoke test
 ./run_ops smoke-dl --symbol AAPL --epochs 1 --timeout 600
 ```
@@ -34,6 +37,7 @@ python -m ops.main down
 python -m ops.main status
 python -m ops.main smoke-fast
 python -m ops.main smoke-universe
+python -m ops.main report-smoke --symbol AAPL
 python -m ops.main smoke-dl --symbol AAPL --model lstm --epochs 1 --job-timeout 600
 ```
 
@@ -94,6 +98,27 @@ Verifies universe endpoints return non-empty data:
 
 ```bash
 ./run_ops smoke-universe [--timeout 30]
+```
+
+### `report-smoke`
+
+Generates an LLM-free analysis report and validates persistence:
+- `POST /api/analyze/report?symbol=AAPL`
+- checks required report headings:
+  - `Overview`
+  - `Price/Volume Snapshot`
+  - `Technical Indicators`
+  - `Chart Patterns`
+  - `Model Signals`
+  - `News`
+  - `Risk Notes`
+  - `Next Steps`
+- verifies artifact APIs:
+  - `GET /api/analysis/list`
+  - `GET /api/analysis/{id}`
+
+```bash
+./run_ops report-smoke [--symbol AAPL] [--timeout 30]
 ```
 
 ### `smoke-dl`
