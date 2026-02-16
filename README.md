@@ -19,6 +19,9 @@ From `~/my-git/dPolaris_ops`:
 # Quick smoke test (health + status endpoints)
 ./run_ops smoke-fast
 
+# Universe smoke test (list + nasdaq300/wsb100/combined non-empty)
+./run_ops smoke-universe
+
 # Deep-learning smoke test
 ./run_ops smoke-dl --symbol AAPL --epochs 1 --timeout 600
 ```
@@ -30,6 +33,7 @@ python -m ops.main up
 python -m ops.main down
 python -m ops.main status
 python -m ops.main smoke-fast
+python -m ops.main smoke-universe
 python -m ops.main smoke-dl --symbol AAPL --model lstm --epochs 1 --job-timeout 600
 ```
 
@@ -78,6 +82,18 @@ Quick sanity check: verifies `/health` and `/api/status` endpoints.
 
 ```bash
 ./run_ops smoke-fast [--timeout 30]
+```
+
+### `smoke-universe`
+
+Verifies universe endpoints return non-empty data:
+- `GET /api/universe/list`
+- `GET /api/universe/nasdaq300`
+- `GET /api/universe/wsb100`
+- `GET /api/universe/combined`
+
+```bash
+./run_ops smoke-universe [--timeout 30]
 ```
 
 ### `smoke-dl`

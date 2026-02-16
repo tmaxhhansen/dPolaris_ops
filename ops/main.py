@@ -785,6 +785,95 @@ def cmd_smoke_fast(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _universe_names_from_payload(payload: Any) -> list[str]:
+    if isinstance(payload, list):
+        return [str(item).strip() for item in payload if str(item).strip()]
+    if isinstance(payload, dict):
+        candidate = payload.get("universes")
+        if isinstance(candidate, list):
+            names: list[str] = []
+            for item in candidate:
+                if isinstance(item, str):
+                    text = item.strip()
+                elif isinstance(item, dict):
+                    text = str(item.get("name") or "").strip()
+                else:
+                    text = ""
+                if text:
+                    names.append(text)
+            return names
+    return []
+
+
+def _universe_count_from_payload(payload: Any) -> int:
+    if isinstance(payload, dict):
+        raw_count = payload.get("count")
+        if isinstance(raw_count, (int, float)):
+            if int(raw_count) > 0:
+                return int(raw_count)
+        for key in ("tickers", "merged", "items", "rows", "data"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return len(value)
+        nested = payload.get("universe")
+        if nested is not None:
+            return _universe_count_from_payload(nested)
+    elif isinstance(payload, list):
+        return len(payload)
+    return 0
+
+
+def cmd_smoke_universe(args: argparse.Namespace) -> int:
+    base_url = _resolve_base_url(args)
+    _ops_log(f"CMD smoke-universe: base_url={base_url}")
+
+    ok, elapsed, detail = wait_healthy(base_url, args.timeout)
+    if not ok:
+        print(f"FAIL /health not ready after {elapsed:.1f}s: {detail}")
+        _ops_log(f"smoke-universe FAIL: /health not ready: {detail}")
+        return EXIT_FAIL
+
+    required = ["nasdaq300", "wsb100", "combined"]
+    list_result = http_json("GET", _endpoint(base_url, "/api/universe/list"), timeout=20)
+    if not list_result.ok:
+        print(f"FAIL GET /api/universe/list: {list_result.error}")
+        _ops_log(f"smoke-universe FAIL: /api/universe/list: {list_result.error}")
+        return EXIT_FAIL
+
+    names = _universe_names_from_payload(list_result.payload)
+    if not names:
+        print("FAIL /api/universe/list returned empty")
+        _ops_log("smoke-universe FAIL: universe/list empty")
+        return EXIT_FAIL
+
+    missing = [name for name in required if name not in names]
+    if missing:
+        print(f"FAIL /api/universe/list missing required names: {missing}")
+        _ops_log(f"smoke-universe FAIL: missing names {missing}")
+        return EXIT_FAIL
+
+    print("PASS /api/universe/list")
+    print(f"  names={names}")
+
+    for name in required:
+        result = http_json("GET", _endpoint(base_url, f"/api/universe/{name}"), timeout=20)
+        if not result.ok:
+            print(f"FAIL GET /api/universe/{name}: {result.error}")
+            _ops_log(f"smoke-universe FAIL: /api/universe/{name}: {result.error}")
+            return EXIT_FAIL
+
+        ticker_count = _universe_count_from_payload(result.payload)
+        if ticker_count <= 0:
+            print(f"FAIL /api/universe/{name} returned no tickers")
+            _ops_log(f"smoke-universe FAIL: /api/universe/{name} empty")
+            return EXIT_FAIL
+
+        print(f"PASS /api/universe/{name} count={ticker_count}")
+
+    _ops_log("smoke-universe PASS")
+    return EXIT_OK
+
+
 def _get_device_info(base_url: str) -> dict[str, Any]:
     """Fetch deep-learning device information from the backend."""
     result = http_json("GET", _endpoint(base_url, "/api/deep-learning/status"), timeout=10)
@@ -1212,6 +1301,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_connection_args(p_smoke_fast)
     p_smoke_fast.add_argument("--timeout", type=int, default=30, help="Seconds to wait for /health")
     p_smoke_fast.set_defaults(func=cmd_smoke_fast)
+
+    p_smoke_universe = sub.add_parser("smoke-universe", help="Verify universe endpoints and non-empty payloads")
+    _add_connection_args(p_smoke_universe)
+    p_smoke_universe.add_argument("--timeout", type=int, default=30, help="Seconds to wait for /health")
+    p_smoke_universe.set_defaults(func=cmd_smoke_universe)
 
     p_smoke_metadata = sub.add_parser("smoke-metadata", help="Test metadata and analysis endpoints")
     _add_connection_args(p_smoke_metadata)
