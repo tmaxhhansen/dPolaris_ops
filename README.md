@@ -7,7 +7,7 @@ Operational testing and management tools for `dpolaris_ai` backend.
 From `~/my-git/dPolaris_ops`:
 
 ```bash
-# Bring up backend (auto-kills stale processes on port 8420)
+# Bring up backend (safe allowlist kill on port 8420)
 ./run_ops up
 
 # Bring down backend
@@ -19,8 +19,14 @@ From `~/my-git/dPolaris_ops`:
 # Quick smoke test (health + status endpoints)
 ./run_ops smoke-fast
 
-# Universe smoke test (list + nasdaq300/wsb100/combined non-empty)
+# Universe smoke test (list + nasdaq300/wsb100/combined400 non-empty)
 ./run_ops smoke-universe
+
+# Force universe rebuild then verify non-empty payloads
+./run_ops universe-rebuild
+
+# News schema smoke test
+./run_ops smoke-news --symbol AAPL
 
 # Multi-section report smoke test (generate + validate artifact persistence)
 ./run_ops report-smoke --symbol AAPL
@@ -37,6 +43,8 @@ python -m ops.main down
 python -m ops.main status
 python -m ops.main smoke-fast
 python -m ops.main smoke-universe
+python -m ops.main universe-rebuild
+python -m ops.main smoke-news --symbol AAPL
 python -m ops.main report-smoke --symbol AAPL
 python -m ops.main smoke-dl --symbol AAPL --model lstm --epochs 1 --job-timeout 600
 ```
@@ -45,7 +53,7 @@ python -m ops.main smoke-dl --symbol AAPL --model lstm --epochs 1 --job-timeout 
 
 ### `up`
 
-Ensures backend is healthy. If port 8420 is occupied, kills the owner process and starts fresh.
+Ensures backend is healthy. If port 8420 is occupied, kills it only when allowlisted (`-m cli.main server`).
 
 ```bash
 ./run_ops up [--timeout 30] [--ai-root PATH] [--force] [--no-force]
@@ -54,8 +62,8 @@ Ensures backend is healthy. If port 8420 is occupied, kills the owner process an
 Options:
 - `--timeout`: Seconds to wait for backend health (default: 30)
 - `--ai-root`: Path to dpolaris_ai repo (auto-detected by default)
-- `--force`: Kill any process on port 8420 (default: True for dev mode)
-- `--no-force`: Only kill allowlisted dpolaris_ai processes
+- `--force`: Kill non-allowlisted process owners on port 8420 (off by default)
+- `--no-force`: Enforce allowlist-only behavior
 
 ### `down`
 
@@ -66,8 +74,8 @@ Stops backend and orchestrator processes.
 ```
 
 Options:
-- `--force`: Kill any process on port 8420 (default: True for dev mode)
-- `--no-force`: Only kill allowlisted dpolaris_ai processes
+- `--force`: Kill non-allowlisted process owners on port 8420 (off by default)
+- `--no-force`: Enforce allowlist-only behavior
 
 ### `status`
 
@@ -94,10 +102,33 @@ Verifies universe endpoints return non-empty data:
 - `GET /api/universe/list`
 - `GET /api/universe/nasdaq300`
 - `GET /api/universe/wsb100`
-- `GET /api/universe/combined`
+- `GET /api/universe/combined400`
 
 ```bash
 ./run_ops smoke-universe [--timeout 30]
+```
+
+### `universe-rebuild`
+
+Runs:
+- `POST /api/universe/rebuild`
+- verifies:
+  - `GET /api/universe/nasdaq300`
+  - `GET /api/universe/wsb100`
+  - `GET /api/universe/combined400`
+
+```bash
+./run_ops universe-rebuild [--timeout 30] [--force]
+```
+
+### `smoke-news`
+
+Validates:
+- `GET /api/news/{symbol}?limit=N`
+- top-level keys and per-item schema (`source`, `title`, `url`, `published_at`)
+
+```bash
+./run_ops smoke-news [--symbol AAPL] [--limit 20] [--timeout 30]
 ```
 
 ### `report-smoke`
@@ -154,13 +185,12 @@ ps -p <PID> -o command=
 
 ### Safe-kill Rules
 
-By default (`--force`), ops will kill any process on port 8420 in dev mode.
+Default mode is allowlist-only.  
+Allowlisted process pattern:
+- command contains `-m cli.main server`
 
-With `--no-force`, only processes matching the allowlist are killed:
-- Command must contain `-m cli.main server`
-- Command must contain `dpolaris_ai` (case-insensitive)
-
-If a non-allowlisted process is found with `--no-force`, the command fails with a clear error.
+If a non-allowlisted process owns port 8420, `up/down` fail with a clear message showing PID + command.
+Use `--force` to override in local dev.
 
 ## Logs
 

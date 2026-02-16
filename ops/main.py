@@ -36,7 +36,6 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8420
 
 SAFE_SERVER_FRAGMENT = "-m cli.main server"
-SAFE_AI_REPO_FRAGMENT = "dpolaris_ai"
 
 HEALTH_OK_STATES = {"healthy", "ok", "running"}
 JOB_SUCCESS_STATES = {"completed", "success"}
@@ -227,8 +226,8 @@ def _command_line_for_pid(pid: int) -> str:
 
 
 def _is_safe_backend_command(command: str) -> bool:
-    lowered = command.lower()
-    return SAFE_SERVER_FRAGMENT in lowered and SAFE_AI_REPO_FRAGMENT in lowered
+    lowered = (command or "").lower()
+    return SAFE_SERVER_FRAGMENT in lowered
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -331,8 +330,8 @@ def _stop_backend_on_port(port: int, force: bool = False) -> tuple[bool, str, li
                 False,
                 (
                     f"port {port} owner is NOT allowlisted; refusing to kill pid={pid}. "
-                    "Allowlist requires command containing '-m cli.main server' and 'dPolaris_ai'. "
-                    f"Use --force to kill anyway. owner command: {command}"
+                    "Allowlist requires command containing '-m cli.main server'. "
+                    f"owner command: {command}"
                 ),
                 owners,
             )
@@ -376,8 +375,8 @@ def _stop_backend_from_pid_file(excluded: set[int], force: bool = False) -> tupl
             False,
             (
                 f"backend.pid points to non-allowlisted pid={pid}; refusing to kill. "
-                "Allowlist requires command containing '-m cli.main server' and 'dPolaris_ai'. "
-                f"Use --force to kill anyway. owner command: {command or '(unknown)'}"
+                "Allowlist requires command containing '-m cli.main server'. "
+                f"owner command: {command or '(unknown)'}"
             ),
         )
 
@@ -699,6 +698,54 @@ def cmd_down(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def cmd_universe_rebuild(args: argparse.Namespace) -> int:
+    base_url = _resolve_base_url(args)
+    force = bool(getattr(args, "force", True))
+    _ops_log(f"CMD universe-rebuild: base_url={base_url} force={force}")
+
+    ok, elapsed, detail = wait_healthy(base_url, args.timeout)
+    if not ok:
+        print(f"FAIL /health not ready after {elapsed:.1f}s: {detail}")
+        return EXIT_FAIL
+
+    result = http_json(
+        "POST",
+        _endpoint(base_url, f"/api/universe/rebuild?force={'true' if force else 'false'}"),
+        timeout=180,
+        body={},
+    )
+    if not result.ok or not isinstance(result.payload, dict):
+        err = result.error or "invalid rebuild response"
+        print(f"FAIL POST /api/universe/rebuild: {err}")
+        return EXIT_FAIL
+
+    payload = result.payload
+    status = str(payload.get("status") or "").strip().lower()
+    if status and status not in {"ok", "success"}:
+        print(f"FAIL rebuild status={status}")
+        print(json.dumps(payload, indent=2))
+        return EXIT_FAIL
+
+    names = ["nasdaq300", "wsb100", "combined400"]
+    for name in names:
+        check = http_json("GET", _endpoint(base_url, f"/api/universe/{name}"), timeout=30)
+        if not check.ok:
+            print(f"FAIL GET /api/universe/{name}: {check.error}")
+            return EXIT_FAIL
+        count = _universe_count_from_payload(check.payload)
+        if count <= 0:
+            print(f"FAIL /api/universe/{name} returned 0 tickers after rebuild")
+            return EXIT_FAIL
+        print(f"PASS /api/universe/{name} count={count}")
+
+    warnings = payload.get("warnings")
+    print("PASS universe rebuild complete")
+    if isinstance(warnings, list) and warnings:
+        print(f"WARN warnings={warnings}")
+    _ops_log("universe-rebuild PASS")
+    return EXIT_OK
+
+
 def _build_status_payload(base_url: str, port: int) -> dict[str, Any]:
     healthy, health_detail = health_once(base_url)
     owners, inspect_error = _collect_port_owners(port)
@@ -843,7 +890,7 @@ def cmd_smoke_universe(args: argparse.Namespace) -> int:
         _ops_log(f"smoke-universe FAIL: /health not ready: {detail}")
         return EXIT_FAIL
 
-    required = ["nasdaq300", "wsb100", "combined"]
+    required = ["nasdaq300", "wsb100", "combined400"]
     list_result = http_json("GET", _endpoint(base_url, "/api/universe/list"), timeout=20)
     if not list_result.ok:
         print(f"FAIL GET /api/universe/list: {list_result.error}")
@@ -881,6 +928,46 @@ def cmd_smoke_universe(args: argparse.Namespace) -> int:
         print(f"PASS /api/universe/{name} count={ticker_count}")
 
     _ops_log("smoke-universe PASS")
+    return EXIT_OK
+
+
+def cmd_smoke_news(args: argparse.Namespace) -> int:
+    base_url = _resolve_base_url(args)
+    symbol = str(getattr(args, "symbol", "AAPL") or "AAPL").strip().upper()
+    limit = max(1, min(int(getattr(args, "limit", 20) or 20), 100))
+    _ops_log(f"CMD smoke-news: base_url={base_url} symbol={symbol} limit={limit}")
+
+    ok, elapsed, detail = wait_healthy(base_url, args.timeout)
+    if not ok:
+        print(f"FAIL /health not ready after {elapsed:.1f}s: {detail}")
+        return EXIT_FAIL
+
+    result = http_json("GET", _endpoint(base_url, f"/api/news/{urlparse.quote(symbol)}?limit={limit}"), timeout=30)
+    if not result.ok or not isinstance(result.payload, dict):
+        err = result.error or "invalid news response"
+        print(f"FAIL GET /api/news/{symbol}: {err}")
+        return EXIT_FAIL
+
+    payload = result.payload
+    items = payload.get("items")
+    if not isinstance(items, list):
+        print("FAIL /api/news response missing items array")
+        return EXIT_FAIL
+
+    for idx, item in enumerate(items[:limit]):
+        if not isinstance(item, dict):
+            print(f"FAIL news item #{idx} is not an object")
+            return EXIT_FAIL
+        for key in ("source", "title", "url", "published_at"):
+            if key not in item:
+                print(f"FAIL news item #{idx} missing key '{key}'")
+                return EXIT_FAIL
+
+    print(f"PASS /api/news/{symbol} count={len(items)} provider={payload.get('provider')}")
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        print(f"WARN warnings={warnings}")
+    _ops_log("smoke-news PASS")
     return EXIT_OK
 
 
@@ -1267,18 +1354,18 @@ def _add_connection_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_force_arg(parser: argparse.ArgumentParser, default: bool = True) -> None:
-    """Add --force flag. Default is True for dev mode (kill without hesitation)."""
+    """Add --force flag."""
     parser.add_argument(
         "--force",
         action="store_true",
         default=default,
-        help="Force kill processes on port even if not allowlisted (default: True for dev mode)",
+        help="Force kill non-allowlisted process owners on target port",
     )
     parser.add_argument(
         "--no-force",
         action="store_false",
         dest="force",
-        help="Only kill allowlisted dpolaris_ai processes",
+        help="Only kill allowlisted backend process owners",
     )
 
 
@@ -1370,14 +1457,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_up = sub.add_parser("up", help="Ensure backend is healthy (start if needed)")
     _add_connection_args(p_up)
-    _add_force_arg(p_up, default=True)
+    _add_force_arg(p_up, default=False)
     p_up.add_argument("--ai-root", default=None, help="Path to dPolaris_ai repo")
     p_up.add_argument("--timeout", type=int, default=30, help="Seconds to wait for backend health after start")
     p_up.set_defaults(func=cmd_up)
 
     p_down = sub.add_parser("down", help="Stop backend and orchestrator")
     _add_connection_args(p_down)
-    _add_force_arg(p_down, default=True)
+    _add_force_arg(p_down, default=False)
     p_down.set_defaults(func=cmd_down)
 
     p_status = sub.add_parser("status", help="Print backend/orchestrator status")
@@ -1394,6 +1481,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_connection_args(p_smoke_universe)
     p_smoke_universe.add_argument("--timeout", type=int, default=30, help="Seconds to wait for /health")
     p_smoke_universe.set_defaults(func=cmd_smoke_universe)
+
+    p_universe_rebuild = sub.add_parser("universe-rebuild", help="Rebuild universes and verify non-empty payloads")
+    _add_connection_args(p_universe_rebuild)
+    _add_force_arg(p_universe_rebuild, default=True)
+    p_universe_rebuild.add_argument("--timeout", type=int, default=30, help="Seconds to wait for /health")
+    p_universe_rebuild.set_defaults(func=cmd_universe_rebuild)
+
+    p_smoke_news = sub.add_parser("smoke-news", help="Validate /api/news/{symbol} response schema")
+    _add_connection_args(p_smoke_news)
+    p_smoke_news.add_argument("--symbol", default="AAPL", help="Ticker symbol")
+    p_smoke_news.add_argument("--limit", type=int, default=20, help="Maximum news items to validate")
+    p_smoke_news.add_argument("--timeout", type=int, default=30, help="Seconds to wait for /health")
+    p_smoke_news.set_defaults(func=cmd_smoke_news)
 
     p_report_smoke = sub.add_parser("report-smoke", help="Generate and validate a multi-section analysis report")
     _add_connection_args(p_report_smoke)
